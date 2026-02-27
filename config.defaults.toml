@@ -29,6 +29,20 @@ filter_tags = ["xaiartifact","xai:tool_usage_card","grok:render"]
 # Tool call 模式: "prompt" (默认, 提示词模拟) 或 "passthrough" (实验性, 使用 toolOverrides)
 tool_call_mode = "prompt"
 
+# ==================== 安全配置 ====================
+[security]
+# 是否要求 /v1 API 使用 app.api_key 认证
+auth_required = false
+# 文件服务是否允许匿名访问（false 时复用 app.api_key 认证）
+files_public = true
+
+# ==================== 配置系统 ====================
+[config]
+# 启动时是否将合并/迁移后的配置自动写回存储
+auto_persist = true
+# 配置结构版本号（用于后续迁移）
+schema_version = 1
+
 
 # ==================== 代理配置 ====================
 [proxy]
@@ -62,6 +76,29 @@ retry_backoff_max = 20.0
 # 总重试预算时间（秒）
 retry_budget = 60.0
 
+# ==================== 入口限流 ====================
+[rate_limit]
+# 是否启用全局请求限流
+enabled = false
+# 生产环境下当 enabled=false 时是否默认启用限流
+enabled_in_production = true
+# 限流窗口（秒）
+window_seconds = 60
+# 单个 (method + path + api_key/ip) 在窗口内的默认请求上限
+default_limit_per_window = 120
+# 是否信任 X-Forwarded-For 作为真实客户端 IP（仅在反向代理可信时开启）
+trust_x_forwarded_for = false
+# 参与限流的路径前缀
+include_prefixes = ["/v1/"]
+# 排除限流的路径前缀（管理端、静态资源、文件下载默认不限流）
+exclude_prefixes = ["/v1/admin", "/v1/files", "/static/"]
+
+# 路由级限流覆盖（支持精确路径或前缀*）
+[rate_limit.route_limits]
+"/v1/chat/completions" = 80
+"/v1/images/generations" = 40
+"/v1/public/imagine*" = 40
+
 
 # ==================== Token 池管理 ====================
 [token]
@@ -79,6 +116,13 @@ save_delay_ms = 500
 usage_flush_interval_sec = 5
 # 多 worker 状态同步间隔（秒）
 reload_interval_sec = 30
+
+# ==================== 日志配置 ====================
+[logging]
+# 跳过请求日志的精确路径
+ignore_paths = ["/", "/login", "/imagine", "/voice", "/admin", "/admin/login", "/admin/config", "/admin/cache", "/admin/token"]
+# 跳过请求日志的路径前缀
+ignore_prefixes = ["/static/"]
 
 # ==================== 缓存管理 ====================
 [cache]

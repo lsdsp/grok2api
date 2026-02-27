@@ -8,35 +8,25 @@ from pathlib import Path
 from typing import List, Optional, Union
 
 from fastapi import APIRouter, File, Form, UploadFile
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
+from app.api.validators.image import (
+    normalize_image_response_format,
+    resolve_aspect_ratio,
+    response_field_name,
+    validate_image_edit_model,
+    validate_image_generation_model,
+    validate_image_request_common,
+)
+from app.core.config import get_config
+from app.core.exceptions import AppException, ErrorType, ValidationException
 from app.services.grok.services.image import ImageGenerationService
 from app.services.grok.services.image_edit import ImageEditService
 from app.services.grok.services.model import ModelService
 from app.services.token import get_token_manager
-from app.core.exceptions import ValidationException, AppException, ErrorType
-from app.core.config import get_config
-
 
 router = APIRouter(tags=["Images"])
-
-ALLOWED_IMAGE_SIZES = {
-    "1280x720",
-    "720x1280",
-    "1792x1024",
-    "1024x1792",
-    "1024x1024",
-}
-
-SIZE_TO_ASPECT = {
-    "1280x720": "16:9",
-    "720x1280": "9:16",
-    "1792x1024": "3:2",
-    "1024x1792": "2:3",
-    "1024x1024": "1:1",
-}
-ALLOWED_ASPECT_RATIOS = {"1:1", "2:3", "3:2", "9:16", "16:9"}
 
 
 class ImageGenerationRequest(BaseModel):
@@ -72,143 +62,38 @@ class ImageEditRequest(BaseModel):
     stream: Optional[bool] = Field(False, description="是否流式输出")
 
 
-def _validate_common_request(
-    request: Union[ImageGenerationRequest, ImageEditRequest],
-    *,
-    allow_ws_stream: bool = False,
-):
-    """通用参数校验"""
-    # 验证 prompt
-    if not request.prompt or not request.prompt.strip():
-        raise ValidationException(
-            message="Prompt cannot be empty", param="prompt", code="empty_prompt"
-        )
-
-    # 验证 n 参数范围
-    if request.n < 1 or request.n > 10:
-        raise ValidationException(
-            message="n must be between 1 and 10", param="n", code="invalid_n"
-        )
-
-    # 流式只支持 n=1 或 n=2
-    if request.stream and request.n not in [1, 2]:
-        raise ValidationException(
-            message="Streaming is only supported when n=1 or n=2",
-            param="stream",
-            code="invalid_stream_n",
-        )
-
-    if allow_ws_stream:
-        if request.stream and request.response_format:
-            allowed_stream_formats = {"b64_json", "base64", "url"}
-            if request.response_format not in allowed_stream_formats:
-                raise ValidationException(
-                    message="Streaming only supports response_format=b64_json/base64/url",
-                    param="response_format",
-                    code="invalid_response_format",
-                )
-
-    if request.response_format:
-        allowed_formats = {"b64_json", "base64", "url"}
-        if request.response_format not in allowed_formats:
-            raise ValidationException(
-                message=f"response_format must be one of {sorted(allowed_formats)}",
-                param="response_format",
-                code="invalid_response_format",
-            )
-
-    if request.size and request.size not in ALLOWED_IMAGE_SIZES:
-        raise ValidationException(
-            message=f"size must be one of {sorted(ALLOWED_IMAGE_SIZES)}",
-            param="size",
-            code="invalid_size",
-        )
-
-
-def validate_generation_request(request: ImageGenerationRequest):
-    """验证图片生成请求参数"""
-    if request.model != "grok-imagine-1.0":
-        raise ValidationException(
-            message="The model `grok-imagine-1.0` is required for image generation.",
-            param="model",
-            code="model_not_supported",
-        )
-    # 验证模型 - 通过 is_image 检查
-    model_info = ModelService.get(request.model)
-    if not model_info or not model_info.is_image:
-        # 获取支持的图片模型列表
-        image_models = [m.model_id for m in ModelService.MODELS if m.is_image]
-        raise ValidationException(
-            message=(
-                f"The model `{request.model}` is not supported for image generation. "
-                f"Supported: {image_models}"
-            ),
-            param="model",
-            code="model_not_supported",
-        )
-    _validate_common_request(request, allow_ws_stream=True)
-
-
-def resolve_response_format(response_format: Optional[str]) -> str:
-    """解析响应格式"""
-    fmt = response_format or get_config("app.image_format")
-    if isinstance(fmt, str):
-        fmt = fmt.lower()
-    if fmt in ("b64_json", "base64", "url"):
-        return fmt
-    raise ValidationException(
-        message="response_format must be one of b64_json, base64, url",
-        param="response_format",
-        code="invalid_response_format",
+def validate_generation_request(request: ImageGenerationRequest) -> None:
+    model = request.model or "grok-imagine-1.0"
+    validate_image_generation_model(model)
+    validate_image_request_common(
+        prompt=request.prompt,
+        n=int(request.n or 1),
+        stream=bool(request.stream),
+        response_format=request.response_format,
+        size=request.size,
+        allow_ws_stream=True,
+        n_param="n",
+        stream_n_param="stream",
+        response_format_param="response_format",
+        size_param="size",
     )
 
 
-def response_field_name(response_format: str) -> str:
-    """获取响应字段名"""
-    return {"url": "url", "base64": "base64"}.get(response_format, "b64_json")
-
-
-def resolve_aspect_ratio(size: str) -> str:
-    """Map OpenAI size to Grok Imagine aspect ratio."""
-    value = (size or "").strip()
-    if not value:
-        return "2:3"
-    if value in SIZE_TO_ASPECT:
-        return SIZE_TO_ASPECT[value]
-    if ":" in value:
-        try:
-            left, right = value.split(":", 1)
-            left_i = int(left.strip())
-            right_i = int(right.strip())
-            if left_i > 0 and right_i > 0:
-                ratio = f"{left_i}:{right_i}"
-                if ratio in ALLOWED_ASPECT_RATIOS:
-                    return ratio
-        except (TypeError, ValueError):
-            pass
-    return "2:3"
-
-
-def validate_edit_request(request: ImageEditRequest, images: List[UploadFile]):
-    """验证图片编辑请求参数"""
-    if request.model != "grok-imagine-1.0-edit":
-        raise ValidationException(
-            message=("The model `grok-imagine-1.0-edit` is required for image edits."),
-            param="model",
-            code="model_not_supported",
-        )
-    model_info = ModelService.get(request.model)
-    if not model_info or not model_info.is_image_edit:
-        edit_models = [m.model_id for m in ModelService.MODELS if m.is_image_edit]
-        raise ValidationException(
-            message=(
-                f"The model `{request.model}` is not supported for image edits. "
-                f"Supported: {edit_models}"
-            ),
-            param="model",
-            code="model_not_supported",
-        )
-    _validate_common_request(request, allow_ws_stream=False)
+def validate_edit_request(request: ImageEditRequest, images: List[UploadFile]) -> None:
+    model = request.model or "grok-imagine-1.0-edit"
+    validate_image_edit_model(model)
+    validate_image_request_common(
+        prompt=request.prompt,
+        n=int(request.n or 1),
+        stream=bool(request.stream),
+        response_format=request.response_format,
+        size=request.size,
+        allow_ws_stream=False,
+        n_param="n",
+        stream_n_param="stream",
+        response_format_param="response_format",
+        size_param="size",
+    )
     if not images:
         raise ValidationException(
             message="Image is required",
@@ -224,7 +109,6 @@ def validate_edit_request(request: ImageEditRequest, images: List[UploadFile]):
 
 
 async def _get_token(model: str):
-    """获取可用 token"""
     token_mgr = await get_token_manager()
     await token_mgr.reload_if_stale()
 
@@ -247,46 +131,35 @@ async def _get_token(model: str):
 
 @router.post("/images/generations")
 async def create_image(request: ImageGenerationRequest):
-    """
-    Image Generation API
-
-    流式响应格式:
-    - event: image_generation.partial_image
-    - event: image_generation.completed
-
-    非流式响应格式:
-    - {"created": ..., "data": [{"b64_json": "..."}], "usage": {...}}
-    """
-    # stream 默认为 false
     if request.stream is None:
         request.stream = False
-
     if request.response_format is None:
-        request.response_format = resolve_response_format(None)
+        request.response_format = normalize_image_response_format(
+            None,
+            default_format=get_config("app.image_format"),
+        )
 
-    # 参数验证
     validate_generation_request(request)
-
-    # 兼容 base64/b64_json
-    if request.response_format == "base64":
-        request.response_format = "b64_json"
-
-    response_format = resolve_response_format(request.response_format)
+    response_format = normalize_image_response_format(
+        request.response_format,
+        default_format=get_config("app.image_format"),
+    )
+    request.response_format = response_format
     response_field = response_field_name(response_format)
 
-    # 获取 token 和模型信息
-    token_mgr, token = await _get_token(request.model)
+    token_mgr, token = await _get_token(request.model or "grok-imagine-1.0")
     model_info = ModelService.get(request.model)
-    aspect_ratio = resolve_aspect_ratio(request.size)
+    size = request.size or "1024x1024"
+    aspect_ratio = resolve_aspect_ratio(size)
 
     result = await ImageGenerationService().generate(
         token_mgr=token_mgr,
         token=token,
         model_info=model_info,
         prompt=request.prompt,
-        n=request.n,
+        n=int(request.n or 1),
         response_format=response_format,
-        size=request.size,
+        size=size,
         aspect_ratio=aspect_ratio,
         stream=bool(request.stream),
     )
@@ -327,13 +200,11 @@ async def edit_image(
     style: Optional[str] = Form(None),
     stream: Optional[bool] = Form(False),
 ):
-    """
-    Image Edits API
-
-    同官方 API 格式，仅支持 multipart/form-data 文件上传
-    """
     if response_format is None:
-        response_format = resolve_response_format(None)
+        response_format = normalize_image_response_format(
+            None,
+            default_format=get_config("app.image_format"),
+        )
 
     try:
         edit_request = ImageEditRequest(
@@ -363,13 +234,12 @@ async def edit_image(
     if edit_request.stream is None:
         edit_request.stream = False
 
-    response_format = resolve_response_format(edit_request.response_format)
-    if response_format == "base64":
-        response_format = "b64_json"
-    edit_request.response_format = response_format
-    response_field = response_field_name(response_format)
-
-    # 参数验证
+    normalized_format = normalize_image_response_format(
+        edit_request.response_format,
+        default_format=get_config("app.image_format"),
+    )
+    edit_request.response_format = normalized_format
+    response_field = response_field_name(normalized_format)
     validate_edit_request(edit_request, image)
 
     max_image_bytes = 50 * 1024 * 1024
@@ -411,8 +281,7 @@ async def edit_image(
         b64 = base64.b64encode(content).decode()
         images.append(f"data:{mime};base64,{b64}")
 
-    # 获取 token 和模型信息
-    token_mgr, token = await _get_token(edit_request.model)
+    token_mgr, token = await _get_token(edit_request.model or "grok-imagine-1.0-edit")
     model_info = ModelService.get(edit_request.model)
 
     result = await ImageEditService().edit(
@@ -421,8 +290,8 @@ async def edit_image(
         model_info=model_info,
         prompt=edit_request.prompt,
         images=images,
-        n=edit_request.n,
-        response_format=response_format,
+        n=int(edit_request.n or 1),
+        response_format=normalized_format,
         stream=bool(edit_request.stream),
     )
 
@@ -434,7 +303,6 @@ async def edit_image(
         )
 
     data = [{response_field: img} for img in result.data]
-
     return JSONResponse(
         content={
             "created": int(time.time()),
@@ -450,3 +318,4 @@ async def edit_image(
 
 
 __all__ = ["router"]
+

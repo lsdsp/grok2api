@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.core.auth import verify_app_key
 from app.core.batch import create_task, expire_task
+from app.core.logger import logger
 from app.services.grok.batch_services.assets import ListService, DeleteService
 from app.services.token.manager import get_token_manager
 router = APIRouter()
@@ -165,8 +166,11 @@ async def cache_stats(request: Request):
             "online_details": online_details,
         }
         return response
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"cache_stats failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch cache stats")
 
 
 @router.get("/cache/list", dependencies=[Depends(verify_app_key)])
@@ -185,8 +189,11 @@ async def list_local(
         cache_service = CacheService()
         result = cache_service.list_files(cache_type, page, page_size)
         return {"status": "success", **result}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"list_local failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list local cache")
 
 
 @router.post("/cache/clear", dependencies=[Depends(verify_app_key)])
@@ -200,8 +207,11 @@ async def clear_local(data: dict):
         cache_service = CacheService()
         result = cache_service.clear(cache_type)
         return {"status": "success", "result": result}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"clear_local failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to clear local cache")
 
 
 @router.post("/cache/item/delete", dependencies=[Depends(verify_app_key)])
@@ -217,8 +227,11 @@ async def delete_local_item(data: dict):
         cache_service = CacheService()
         result = cache_service.delete_file(cache_type, name)
         return {"status": "success", "result": result}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"delete_local_item failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete local cache item")
 
 
 @router.post("/cache/online/clear", dependencies=[Depends(verify_app_key)])
@@ -263,8 +276,11 @@ async def clear_online(data: dict):
         if res.get("ok") and data.get("status") == "success":
             return {"status": "success", "result": data.get("result")}
         return {"status": "error", "error": data.get("error") or res.get("error")}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"clear_online failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to clear online cache")
 
 
 @router.post("/cache/online/clear/async", dependencies=[Depends(verify_app_key)])
@@ -322,7 +338,8 @@ async def clear_online_async(data: dict):
             }
             task.finish(result)
         except Exception as e:
-            task.fail_task(str(e))
+            logger.exception(f"clear_online_async failed: {e}")
+            task.fail_task("Failed to clear online cache")
         finally:
             import asyncio
             asyncio.create_task(expire_task(task.id, 300))
@@ -429,7 +446,8 @@ async def load_cache_async(data: dict):
             }
             task.finish(result)
         except Exception as e:
-            task.fail_task(str(e))
+            logger.exception(f"load_cache_async failed: {e}")
+            task.fail_task("Failed to load online cache")
         finally:
             import asyncio
             asyncio.create_task(expire_task(task.id, 300))

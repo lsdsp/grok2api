@@ -2,6 +2,7 @@
 API 认证模块
 """
 
+import os
 from typing import Optional
 from fastapi import HTTPException, status, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -12,6 +13,8 @@ DEFAULT_API_KEY = ""
 DEFAULT_APP_KEY = "grok2api"
 DEFAULT_PUBLIC_KEY = ""
 DEFAULT_PUBLIC_ENABLED = False
+DEFAULT_AUTH_REQUIRED = False
+DEFAULT_FILES_PUBLIC = True
 
 # 定义 Bearer Scheme
 security = HTTPBearer(
@@ -30,12 +33,14 @@ def get_admin_api_key() -> str:
     api_key = get_config("app.api_key", DEFAULT_API_KEY)
     return api_key or ""
 
+
 def get_app_key() -> str:
     """
     获取 App Key（后台管理密码）。
     """
     app_key = get_config("app.app_key", DEFAULT_APP_KEY)
     return app_key or ""
+
 
 def get_public_api_key() -> str:
     """
@@ -46,6 +51,7 @@ def get_public_api_key() -> str:
     public_key = get_config("app.public_key", DEFAULT_PUBLIC_KEY)
     return public_key or ""
 
+
 def is_public_enabled() -> bool:
     """
     是否开启 public 功能入口。
@@ -53,17 +59,39 @@ def is_public_enabled() -> bool:
     return bool(get_config("app.public_enabled", DEFAULT_PUBLIC_ENABLED))
 
 
-async def verify_api_key(
-    auth: Optional[HTTPAuthorizationCredentials] = Security(security),
-) -> Optional[str]:
+def is_api_auth_required() -> bool:
     """
-    验证 Bearer Token
+    是否启用 API Key 鉴权。
+    """
+    return bool(get_config("security.auth_required", DEFAULT_AUTH_REQUIRED))
 
-    如果 config.toml 中未配置 api_key，则不启用认证。
+
+def is_files_public() -> bool:
     """
-    api_key = get_admin_api_key()
-    if not api_key:
-        return None
+    文件服务是否允许匿名访问。
+    """
+    return bool(get_config("security.files_public", DEFAULT_FILES_PUBLIC))
+
+
+def is_production_env() -> bool:
+    """
+    检测当前是否生产环境。
+    """
+    env = (os.getenv("APP_ENV") or os.getenv("ENV") or "").strip().lower()
+    return env in {"prod", "production"}
+
+
+def _validate_bearer(
+    auth: Optional[HTTPAuthorizationCredentials],
+    expected: str,
+    *,
+    misconfigured_detail: str,
+) -> str:
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=misconfigured_detail,
+        )
 
     if not auth:
         raise HTTPException(
@@ -72,7 +100,7 @@ async def verify_api_key(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if auth.credentials != api_key:
+    if auth.credentials != expected:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token",
@@ -80,6 +108,40 @@ async def verify_api_key(
         )
 
     return auth.credentials
+
+
+async def verify_api_key(
+    auth: Optional[HTTPAuthorizationCredentials] = Security(security),
+) -> Optional[str]:
+    """
+    验证 Bearer Token
+
+    当 security.auth_required = false 时，跳过认证。
+    当 security.auth_required = true 时，必须配置 app.api_key。
+    """
+    if not is_api_auth_required():
+        return None
+
+    api_key = get_admin_api_key()
+    return _validate_bearer(
+        auth,
+        api_key,
+        misconfigured_detail="API authentication is enabled but app.api_key is empty",
+    )
+
+
+async def verify_api_key_required(
+    auth: Optional[HTTPAuthorizationCredentials] = Security(security),
+) -> str:
+    """
+    强制验证 API Key（不受 security.auth_required 影响）。
+    """
+    api_key = get_admin_api_key()
+    return _validate_bearer(
+        auth,
+        api_key,
+        misconfigured_detail="File access authentication is enabled but app.api_key is empty",
+    )
 
 
 async def verify_app_key(

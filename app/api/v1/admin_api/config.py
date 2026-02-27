@@ -1,9 +1,12 @@
 import os
+from copy import deepcopy
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import verify_app_key
 from app.core.config import config
+from app.core.logger import logger
 from app.core.storage import get_storage, LocalStorage, RedisStorage, SQLStorage
 from app.services.token.manager import get_token_manager
 
@@ -18,6 +21,66 @@ def _mask_secret(value: str, head: int = 8, tail: int = 8) -> str:
     return f"{value[:head]}...{value[-tail:]}"
 
 
+SENSITIVE_PATHS = {
+    ("app", "api_key"),
+    ("app", "app_key"),
+    ("app", "public_key"),
+    ("proxy", "cf_clearance"),
+}
+SENSITIVE_KEY_HINTS = ("token", "secret", "password", "clearance")
+
+
+def _is_sensitive_path(path: tuple[str, ...]) -> bool:
+    if len(path) >= 2 and (path[-2], path[-1]) in SENSITIVE_PATHS:
+        return True
+    if not path:
+        return False
+    key = path[-1].lower()
+    if key.endswith("_key"):
+        return True
+    return any(hint in key for hint in SENSITIVE_KEY_HINTS)
+
+
+def _mask_config_values(data: Any, path: tuple[str, ...] = ()) -> Any:
+    if isinstance(data, dict):
+        return {
+            key: _mask_config_values(value, path + (str(key),))
+            for key, value in data.items()
+        }
+    if isinstance(data, list):
+        return [_mask_config_values(item, path) for item in data]
+    if isinstance(data, str) and data and _is_sensitive_path(path):
+        return _mask_secret(data)
+    return data
+
+
+def _restore_masked_secrets(
+    incoming: Any, current: Any, path: tuple[str, ...] = ()
+) -> Any:
+    """
+    如果前端提交的值仍是掩码，保留原始密文，避免被 "***" 覆盖。
+    """
+    if isinstance(incoming, dict):
+        current_dict = current if isinstance(current, dict) else {}
+        return {
+            key: _restore_masked_secrets(
+                value, current_dict.get(key), path + (str(key),)
+            )
+            for key, value in incoming.items()
+        }
+    if isinstance(incoming, list):
+        return incoming
+    if (
+        isinstance(incoming, str)
+        and isinstance(current, str)
+        and current
+        and _is_sensitive_path(path)
+        and incoming == _mask_secret(current)
+    ):
+        return current
+    return incoming
+
+
 @router.get("/verify", dependencies=[Depends(verify_app_key)])
 async def admin_verify():
     """验证后台访问密钥（app_key）"""
@@ -27,22 +90,29 @@ async def admin_verify():
 @router.get("/config", dependencies=[Depends(verify_app_key)])
 async def get_config():
     """获取当前配置"""
-    # 暴露原始配置字典
-    return config._config
+    return _mask_config_values(deepcopy(config._config))
 
 
 @router.post("/config", dependencies=[Depends(verify_app_key)])
 async def update_config(data: dict):
     """更新配置"""
     try:
-        await config.update(data)
-        proxy_cfg = data.get("proxy") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=400, detail="Invalid config payload")
+        merged_input = _restore_masked_secrets(data, config._config)
+        await config.update(merged_input)
+        proxy_cfg = (
+            merged_input.get("proxy") if isinstance(merged_input, dict) else None
+        )
         if isinstance(proxy_cfg, dict) and "cf_clearance" in proxy_cfg:
             mgr = await get_token_manager()
             mgr.clear_auto_refresh_pause()
         return {"status": "success", "message": "配置已更新"}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to update config: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update config")
 
 
 @router.post("/config/proxy/cf_clearance", dependencies=[Depends(verify_app_key)])
@@ -80,7 +150,8 @@ async def update_proxy_cf_clearance(data: dict):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to update cf_clearance: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update cf_clearance")
 
 
 @router.get("/storage", dependencies=[Depends(verify_app_key)])

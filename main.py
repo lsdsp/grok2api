@@ -27,10 +27,16 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi import Depends  # noqa: E402
 
-from app.core.auth import verify_api_key  # noqa: E402
+from app.core.auth import (  # noqa: E402
+    get_admin_api_key,
+    is_api_auth_required,
+    is_production_env,
+    verify_api_key,
+)
 from app.core.config import get_config  # noqa: E402
 from app.core.logger import logger, setup_logging  # noqa: E402
 from app.core.exceptions import register_exception_handlers  # noqa: E402
+from app.core.rate_limit_middleware import RequestRateLimitMiddleware  # noqa: E402
 from app.core.response_middleware import ResponseLoggerMiddleware  # noqa: E402
 from app.api.v1.chat import router as chat_router  # noqa: E402
 from app.api.v1.image import router as image_router  # noqa: E402
@@ -38,15 +44,30 @@ from app.api.v1.files import router as files_router  # noqa: E402
 from app.api.v1.models import router as models_router  # noqa: E402
 from app.api.v1.response import router as responses_router  # noqa: E402
 from app.services.token import get_scheduler  # noqa: E402
-from app.api.v1.admin_api import router as admin_router
-from app.api.v1.public_api import router as public_router
-from app.api.pages import router as pages_router
-from fastapi.staticfiles import StaticFiles
+from app.api.v1.admin_api import router as admin_router  # noqa: E402
+from app.api.v1.public_api import router as public_router  # noqa: E402
+from app.api.pages import router as pages_router  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 # 初始化日志
 setup_logging(
     level=os.getenv("LOG_LEVEL", "INFO"), json_console=False, file_logging=True
 )
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on", "y")
+
+
+def _env_list(name: str, default: list[str]) -> list[str]:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    parsed = [item.strip() for item in value.split(",") if item.strip()]
+    return parsed or default
 
 
 @asynccontextmanager
@@ -60,6 +81,23 @@ async def lifespan(app: FastAPI):
 
     # 2. 加载配置
     await config.load()
+
+    auth_required = is_api_auth_required()
+    api_key = get_admin_api_key()
+    if auth_required and not api_key:
+        message = (
+            "security.auth_required=true but app.api_key is empty. "
+            "Set app.api_key or disable auth_required explicitly."
+        )
+        if is_production_env():
+            logger.error(f"{message} Startup aborted in production environment.")
+            raise RuntimeError(message)
+        logger.warning(message)
+    elif not auth_required:
+        logger.warning(
+            "API authentication is disabled (security.auth_required=false). "
+            "Only use this in trusted environments."
+        )
 
     # 3. 启动服务显示
     logger.info("Starting Grok2API...")
@@ -98,14 +136,28 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    cors_allow_origins = _env_list("CORS_ALLOW_ORIGINS", ["*"])
+    cors_allow_methods = _env_list("CORS_ALLOW_METHODS", ["*"])
+    cors_allow_headers = _env_list("CORS_ALLOW_HEADERS", ["*"])
+    cors_allow_credentials = _env_flag("CORS_ALLOW_CREDENTIALS", False)
+    if "*" in cors_allow_origins and cors_allow_credentials:
+        logger.warning(
+            "CORS_ALLOW_ORIGINS includes '*' while credentials are enabled. "
+            "Forcing CORS_ALLOW_CREDENTIALS=false to satisfy browser CORS rules."
+        )
+        cors_allow_credentials = False
+
     # CORS 配置
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=cors_allow_origins,
+        allow_credentials=cors_allow_credentials,
+        allow_methods=cors_allow_methods,
+        allow_headers=cors_allow_headers,
     )
+
+    # 全局入口限流（可配置）
+    app.add_middleware(RequestRateLimitMiddleware)
 
     # 请求日志和 ID 中间件
     app.add_middleware(ResponseLoggerMiddleware)

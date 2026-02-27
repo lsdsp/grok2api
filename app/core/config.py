@@ -247,13 +247,14 @@ class Config:
                 )
 
             merged = _deep_merge(self._defaults, config_data)
+            auto_persist = bool((merged.get("config") or {}).get("auto_persist", True))
 
             # 自动回填缺失配置到存储
             # 或迁移了配置后需要更新
             should_persist = (
                 (not from_remote) or (merged != config_data) or deprecated_sections
             )
-            if should_persist:
+            if should_persist and auto_persist:
                 async with storage.acquire_lock("config_save", timeout=10):
                     await storage.save_config(merged)
                 if not from_remote:
@@ -262,6 +263,10 @@ class Config:
                     )
                 if deprecated_sections:
                     logger.info("Configuration automatically migrated and cleaned.")
+            elif should_persist and not auto_persist:
+                logger.info(
+                    "Config auto_persist is disabled; skip automatic persistence on startup."
+                )
 
             self._config = merged
         except Exception as e:

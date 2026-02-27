@@ -111,8 +111,11 @@ async def update_tokens(data: dict):
             mgr = await get_token_manager()
             await mgr.reload()
         return {"status": "success", "message": "Token 已更新"}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"update_tokens failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update tokens")
 
 
 @router.post("/tokens/refresh", dependencies=[Depends(verify_app_key)])
@@ -180,8 +183,11 @@ async def refresh_tokens(data: dict):
                 response["upstream_message"] = challenge_message
             response["refresh_pause"] = mgr.get_refresh_state()
         return response
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"refresh_tokens failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to refresh tokens")
 
 
 @router.post("/tokens/refresh/async", dependencies=[Depends(verify_app_key)])
@@ -272,7 +278,8 @@ async def refresh_tokens_async(data: dict):
                 warning = "检测到 Cloudflare Challenge，请更新 cf_clearance 后重试。"
             task.finish(result, warning=warning)
         except Exception as e:
-            task.fail_task(str(e))
+            logger.exception(f"refresh_tokens_async failed: {e}")
+            task.fail_task("Failed to refresh tokens")
         finally:
             import asyncio
             asyncio.create_task(expire_task(task.id, 300))
@@ -395,8 +402,8 @@ async def enable_nsfw(data: dict):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Enable NSFW failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Enable NSFW failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to enable NSFW")
 
 
 @router.post("/tokens/nsfw/enable/async", dependencies=[Depends(verify_app_key)])
@@ -466,7 +473,8 @@ async def enable_nsfw_async(data: dict):
             }
             task.finish(result)
         except Exception as e:
-            task.fail_task(str(e))
+            logger.exception(f"enable_nsfw_async failed: {e}")
+            task.fail_task("Failed to enable NSFW")
         finally:
             import asyncio
             asyncio.create_task(expire_task(task.id, 300))

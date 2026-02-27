@@ -10,7 +10,43 @@ import uuid
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
+from app.core.config import get_config
 from app.core.logger import logger
+
+DEFAULT_IGNORE_PATHS = [
+    "/",
+    "/login",
+    "/imagine",
+    "/voice",
+    "/admin",
+    "/admin/login",
+    "/admin/config",
+    "/admin/cache",
+    "/admin/token",
+]
+DEFAULT_IGNORE_PREFIXES = ["/static/"]
+
+
+def _as_list(value, default):
+    if isinstance(value, (list, tuple)):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return items or list(default)
+    if isinstance(value, str):
+        items = [part.strip() for part in value.split(",") if part.strip()]
+        return items or list(default)
+    return list(default)
+
+
+def _should_skip_logging(path: str) -> bool:
+    ignore_paths_raw = get_config("logging.ignore_paths", DEFAULT_IGNORE_PATHS)
+    ignore_paths = set(_as_list(ignore_paths_raw, DEFAULT_IGNORE_PATHS))
+    ignore_prefixes = _as_list(
+        get_config("logging.ignore_prefixes", DEFAULT_IGNORE_PREFIXES),
+        DEFAULT_IGNORE_PREFIXES,
+    )
+    if path in ignore_paths:
+        return True
+    return any(path.startswith(prefix) for prefix in ignore_prefixes)
 
 
 class ResponseLoggerMiddleware(BaseHTTPMiddleware):
@@ -26,60 +62,43 @@ class ResponseLoggerMiddleware(BaseHTTPMiddleware):
 
         start_time = time.time()
         path = request.url.path
+        request_logger = logger.bind(
+            traceID=trace_id,
+            method=request.method,
+            path=path,
+        )
 
-        if path.startswith("/static/") or path in (
-            "/",
-            "/login",
-            "/imagine",
-            "/voice",
-            "/admin",
-            "/admin/login",
-            "/admin/config",
-            "/admin/cache",
-            "/admin/token",
-        ):
-            return await call_next(request)
+        if _should_skip_logging(path):
+            response = await call_next(request)
+            response.headers["X-Trace-Id"] = trace_id
+            return response
 
         # 记录请求信息
-        logger.info(
-            f"Request: {request.method} {request.url.path}",
-            extra={
-                "traceID": trace_id,
-                "method": request.method,
-                "path": request.url.path,
-            },
-        )
+        request_logger.info(f"Request: {request.method} {path}")
 
         try:
             response = await call_next(request)
 
             # 计算耗时
             duration = (time.time() - start_time) * 1000
+            response.headers["X-Trace-Id"] = trace_id
 
             # 记录响应信息
-            logger.info(
-                f"Response: {request.method} {request.url.path} - {response.status_code} ({duration:.2f}ms)",
-                extra={
-                    "traceID": trace_id,
-                    "method": request.method,
-                    "path": request.url.path,
-                    "status": response.status_code,
-                    "duration_ms": round(duration, 2),
-                },
+            request_logger.bind(
+                status=response.status_code,
+                duration_ms=round(duration, 2),
+            ).info(
+                f"Response: {request.method} {path} - {response.status_code} ({duration:.2f}ms)"
             )
 
             return response
 
         except Exception as e:
             duration = (time.time() - start_time) * 1000
-            logger.error(
-                f"Response Error: {request.method} {request.url.path} - {str(e)} ({duration:.2f}ms)",
-                extra={
-                    "traceID": trace_id,
-                    "method": request.method,
-                    "path": request.url.path,
-                    "duration_ms": round(duration, 2),
-                    "error": str(e),
-                },
+            request_logger.bind(
+                duration_ms=round(duration, 2),
+                error=str(e),
+            ).error(
+                f"Response Error: {request.method} {path} - {str(e)} ({duration:.2f}ms)"
             )
             raise e
