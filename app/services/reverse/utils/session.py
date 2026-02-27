@@ -9,6 +9,7 @@ from curl_cffi.requests import AsyncSession
 
 from app.core.config import get_config
 from app.core.logger import logger
+from app.services.reverse.utils.transport import should_retry_without_impersonate
 
 
 class ResettableSession:
@@ -18,10 +19,11 @@ class ResettableSession:
         self,
         *,
         reset_on_status: Optional[Iterable[int]] = None,
+        auto_impersonate: bool = True,
         **session_kwargs: Any,
     ):
         self._session_kwargs = dict(session_kwargs)
-        if not self._session_kwargs.get("impersonate"):
+        if auto_impersonate and not self._session_kwargs.get("impersonate"):
             browser = get_config("proxy.browser")
             if browser:
                 self._session_kwargs["impersonate"] = browser
@@ -54,7 +56,22 @@ class ResettableSession:
 
     async def _request(self, method: str, *args: Any, **kwargs: Any):
         await self._maybe_reset()
-        response = await getattr(self._session, method)(*args, **kwargs)
+        request_fn = getattr(self._session, method)
+        try:
+            response = await request_fn(*args, **kwargs)
+        except Exception as e:
+            browser = kwargs.get("impersonate")
+            proxies = kwargs.get("proxies")
+            if should_retry_without_impersonate(e, browser, proxies):
+                logger.warning(
+                    "ResettableSession: proxy TLS incompatibility with "
+                    f"impersonate='{browser}', retrying once without impersonate"
+                )
+                fallback_kwargs = dict(kwargs)
+                fallback_kwargs.pop("impersonate", None)
+                response = await request_fn(*args, **fallback_kwargs)
+            else:
+                raise
         if self._reset_on_status and response.status_code in self._reset_on_status:
             self._reset_requested = True
         return response

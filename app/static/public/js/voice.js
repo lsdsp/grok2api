@@ -122,6 +122,39 @@
     throw new Error(`当前环境不支持麦克风权限，${secureHint}`);
   }
 
+  function diagnoseConnectionError(err) {
+    const raw = err && err.message ? String(err.message) : '连接失败';
+    const lower = raw.toLowerCase();
+    if (lower.includes('pc connection') || lower.includes('ice')) {
+      return `${raw}。WebRTC 建连失败（可能被代理、防火墙或浏览器隐私策略拦截）。请关闭相关拦截并检查网络后重试。`;
+    }
+    if (
+      lower.includes('notallowederror') ||
+      lower.includes('permission denied') ||
+      lower.includes('permission')
+    ) {
+      return `${raw}。麦克风权限被拒绝，请允许麦克风访问后重试。`;
+    }
+    if (lower.includes('token') || lower.includes('401') || lower.includes('403')) {
+      return `${raw}。会话凭证无效或已过期，请刷新页面后重试。`;
+    }
+    if (lower.includes('network') || lower.includes('fetch')) {
+      return `${raw}。网络请求失败，请检查代理、DNS 与防火墙配置。`;
+    }
+    return raw;
+  }
+
+  async function safeDisconnectCurrentRoom() {
+    if (!room) return;
+    try {
+      await room.disconnect();
+    } catch (e) {
+      // ignore
+    } finally {
+      room = null;
+    }
+  }
+
   async function startSession() {
     if (!ensureLiveKit()) {
       return;
@@ -178,8 +211,13 @@
         }
       });
 
-      room.on(RoomEvent.Disconnected, () => {
-        log('已断开连接');
+      room.on(RoomEvent.Disconnected, (reason) => {
+        if (reason) {
+          const text = reason.message || reason.toString();
+          log(`已断开连接: ${text}`, 'warn');
+        } else {
+          log('已断开连接');
+        }
         resetUI();
       });
 
@@ -198,24 +236,24 @@
       log('语音已开启');
       toast('语音连接成功', 'success');
     } catch (err) {
-      const message = err && err.message ? err.message : '连接失败';
+      const message = diagnoseConnectionError(err);
       log(`错误: ${message}`, 'error');
       toast(message, 'error');
       setStatus('error', '连接错误');
+      await safeDisconnectCurrentRoom();
       startBtn.disabled = false;
     }
   }
 
   async function stopSession() {
-    if (room) {
-      await room.disconnect();
-    }
+    await safeDisconnectCurrentRoom();
     resetUI();
   }
 
   function resetUI() {
     setStatus('', '未连接');
     setButtons(false);
+    room = null;
     if (audioRoot) {
       audioRoot.innerHTML = '';
     }

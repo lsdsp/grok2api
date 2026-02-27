@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.core.auth import get_app_key, verify_app_key
+from app.core.config import get_config
 from app.core.batch import create_task, expire_task, get_task
 from app.core.logger import logger
 from app.core.storage import get_storage
@@ -13,6 +14,26 @@ from app.services.grok.batch_services.nsfw import NSFWService
 from app.services.token.manager import get_token_manager
 
 router = APIRouter()
+
+
+def _parse_usage_refresh_result(res: dict) -> tuple[bool, str | None, str | None]:
+    """将 run_batch 的单项结果转换为统一结构。"""
+    if not isinstance(res, dict):
+        return False, None, None
+
+    data = res.get("data")
+    if isinstance(data, bool):
+        return bool(res.get("ok") and data is True), None, None
+
+    if isinstance(data, dict):
+        ok = bool(res.get("ok") and data.get("ok") is True)
+        if ok:
+            return True, None, None
+        error_code = data.get("error_code")
+        message = data.get("message")
+        return False, error_code, message
+
+    return False, None, res.get("error")
 
 
 @router.get("/tokens", dependencies=[Depends(verify_app_key)])
@@ -113,16 +134,51 @@ async def refresh_tokens(data: dict):
         raw_results = await UsageService.batch(
             unique_tokens,
             mgr,
+            include_detail=True,
         )
 
         results = {}
+        ok_count = 0
+        fail_count = 0
+        challenge_count = 0
+        challenge_message = ""
         for token, res in raw_results.items():
-            if res.get("ok"):
-                results[token] = res.get("data", False)
+            is_ok, error_code, message = _parse_usage_refresh_result(res)
+            if is_ok:
+                ok_count += 1
+                results[token] = True
             else:
+                fail_count += 1
                 results[token] = False
+                if error_code == "cloudflare_challenge":
+                    challenge_count += 1
+                    if not challenge_message and isinstance(message, str):
+                        challenge_message = message
 
-        response = {"status": "success", "results": results}
+        response = {
+            "status": "success",
+            "result_status": (
+                "failed" if ok_count == 0 else "partial" if fail_count > 0 else "success"
+            ),
+            "summary": {
+                "total": len(unique_tokens),
+                "ok": ok_count,
+                "fail": fail_count,
+            },
+            "results": results,
+            "challenge": {
+                "blocked": challenge_count > 0,
+                "count": challenge_count,
+            },
+        }
+        if challenge_count > 0:
+            pause_seconds = get_config("token.cf_challenge_pause_sec", 900)
+            mgr.pause_auto_refresh(pause_seconds, "cloudflare_challenge")
+            response["error_code"] = "cloudflare_challenge"
+            response["message"] = "Detected Cloudflare challenge. Please update proxy.cf_clearance and retry."
+            if challenge_message:
+                response["upstream_message"] = challenge_message
+            response["refresh_pause"] = mgr.get_refresh_state()
         return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -149,11 +205,13 @@ async def refresh_tokens_async(data: dict):
         try:
 
             async def _on_item(item: str, res: dict):
-                task.record(bool(res.get("ok")))
+                is_ok, _, _ = _parse_usage_refresh_result(res)
+                task.record(is_ok)
 
             raw_results = await UsageService.batch(
                 unique_tokens,
                 mgr,
+                include_detail=True,
                 on_item=_on_item,
                 should_cancel=lambda: task.cancelled,
             )
@@ -165,26 +223,54 @@ async def refresh_tokens_async(data: dict):
             results: dict[str, bool] = {}
             ok_count = 0
             fail_count = 0
+            challenge_count = 0
+            challenge_message = ""
             for token, res in raw_results.items():
-                if res.get("ok") and res.get("data") is True:
+                is_ok, error_code, message = _parse_usage_refresh_result(res)
+                if is_ok:
                     ok_count += 1
                     results[token] = True
                 else:
                     fail_count += 1
                     results[token] = False
+                    if error_code == "cloudflare_challenge":
+                        challenge_count += 1
+                        if not challenge_message and isinstance(message, str):
+                            challenge_message = message
 
             await mgr._save(force=True)
 
             result = {
                 "status": "success",
+                "result_status": (
+                    "failed"
+                    if ok_count == 0
+                    else "partial" if fail_count > 0 else "success"
+                ),
                 "summary": {
                     "total": len(unique_tokens),
                     "ok": ok_count,
                     "fail": fail_count,
                 },
                 "results": results,
+                "challenge": {
+                    "blocked": challenge_count > 0,
+                    "count": challenge_count,
+                },
             }
-            task.finish(result)
+            warning = None
+            if challenge_count > 0:
+                pause_seconds = get_config("token.cf_challenge_pause_sec", 900)
+                mgr.pause_auto_refresh(pause_seconds, "cloudflare_challenge")
+                result["error_code"] = "cloudflare_challenge"
+                result["message"] = (
+                    "Detected Cloudflare challenge. Please update proxy.cf_clearance and retry."
+                )
+                if challenge_message:
+                    result["upstream_message"] = challenge_message
+                result["refresh_pause"] = mgr.get_refresh_state()
+                warning = "检测到 Cloudflare Challenge，请更新 cf_clearance 后重试。"
+            task.finish(result, warning=warning)
         except Exception as e:
             task.fail_task(str(e))
         finally:

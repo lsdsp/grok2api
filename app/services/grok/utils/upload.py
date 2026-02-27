@@ -33,11 +33,9 @@ class UploadService:
     async def create(self) -> ResettableSession:
         """Create or reuse a session."""
         if self._session is None:
-            browser = get_config("proxy.browser")
-            if browser:
-                self._session = ResettableSession(impersonate=browser)
-            else:
-                self._session = ResettableSession()
+            # Keep session-level transport neutral.
+            # Reverse layer handles impersonation and fallback logic.
+            self._session = ResettableSession(auto_impersonate=False)
         return self._session
 
     async def close(self):

@@ -38,11 +38,9 @@ class DownloadService:
     async def create(self) -> ResettableSession:
         """Create or reuse a session."""
         if self._session is None:
-            browser = get_config("proxy.browser")
-            if browser:
-                self._session = ResettableSession(impersonate=browser)
-            else:
-                self._session = ResettableSession()
+            # Keep session-level transport neutral.
+            # Reverse layer handles impersonation and fallback logic.
+            self._session = ResettableSession(auto_impersonate=False)
         return self._session
 
     async def close(self):
@@ -56,6 +54,7 @@ class DownloadService:
     ) -> str:
         asset_url = path_or_url
         path = path_or_url
+        parsed = None
         if path_or_url.startswith("http"):
             parsed = urlparse(path_or_url)
             path = parsed.path or ""
@@ -66,10 +65,26 @@ class DownloadService:
             path = path_or_url
             asset_url = f"https://assets.grok.com{path_or_url}"
 
-        app_url = get_config("app.app_url")
-        if app_url:
-            await self.download_file(asset_url, token, media_type)
-            return f"{app_url.rstrip('/')}/v1/files/{media_type}{path}"
+        app_url = str(get_config("app.app_url") or "").strip()
+        host = (parsed.netloc or "").lower() if parsed else ""
+        is_assets_host = host.endswith("assets.grok.com") or not path_or_url.startswith(
+            "http"
+        )
+
+        # Prefer local file proxy for assets.grok.com resources. This avoids
+        # browser-side 403/CORS issues on direct assets URLs and improves
+        # compatibility across restricted networks.
+        if is_assets_host:
+            try:
+                await self.download_file(asset_url, token, media_type)
+            except Exception as e:
+                logger.warning(f"Local asset proxy fallback failed: {e}")
+                return asset_url
+            proxy_path = f"/v1/files/{media_type}{path}"
+            if app_url:
+                return f"{app_url.rstrip('/')}{proxy_path}"
+            return proxy_path
+
         return asset_url
 
     async def render_image(

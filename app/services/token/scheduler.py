@@ -51,13 +51,21 @@ class TokenRefreshScheduler:
                     manager = await get_token_manager()
                     result = await manager.refresh_cooling_tokens()
 
-                    logger.info(
-                        f"Scheduler: refresh completed - "
-                        f"checked={result['checked']}, "
-                        f"refreshed={result['refreshed']}, "
-                        f"recovered={result['recovered']}, "
-                        f"expired={result['expired']}"
-                    )
+                    if result.get("paused"):
+                        logger.warning(
+                            "Scheduler: refresh paused - "
+                            f"reason={result.get('pause_reason')}, "
+                            f"remaining={result.get('pause_remaining_sec')}s"
+                        )
+                    else:
+                        logger.info(
+                            f"Scheduler: refresh completed - "
+                            f"checked={result['checked']}, "
+                            f"refreshed={result['refreshed']}, "
+                            f"recovered={result['recovered']}, "
+                            f"expired={result['expired']}"
+                        )
+
                 finally:
                     if lock is not None and lock_acquired:
                         try:

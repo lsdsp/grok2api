@@ -268,6 +268,10 @@
   height: 100%;
 }
 
+.nsfw-row {
+  align-items: center;
+}
+
 .settings-folder {
   display: flex;
   flex-direction: column;

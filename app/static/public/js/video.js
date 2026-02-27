@@ -36,6 +36,7 @@
   let lastProgress = 0;
   let currentPreviewItem = null;
   let previewCount = 0;
+  let previewValidationVersion = 0;
   const DEFAULT_REASONING_EFFORT = 'low';
 
   function toast(message, type) {
@@ -92,6 +93,7 @@
   }
 
   function resetOutput(keepPreview) {
+    previewValidationVersion += 1;
     progressBuffer = '';
     contentBuffer = '';
     collectingContent = false;
@@ -340,6 +342,13 @@
     if (videoEl) {
       videoEl.controls = true;
       videoEl.preload = 'metadata';
+      videoEl.addEventListener(
+        'error',
+        () => {
+          container.classList.add('is-error');
+        },
+        { once: true }
+      );
       const source = videoEl.querySelector('source');
       if (source && source.getAttribute('src')) {
         videoUrl = source.getAttribute('src');
@@ -357,7 +366,63 @@
     const body = container.querySelector('.video-item-body');
     if (!body) return;
     body.innerHTML = `\n      <video controls preload="metadata">\n        <source src="${safeUrl}" type="video/mp4">\n      </video>\n    `;
+    const videoEl = body.querySelector('video');
+    if (videoEl) {
+      videoEl.addEventListener(
+        'error',
+        () => {
+          container.classList.add('is-error');
+        },
+        { once: true }
+      );
+    }
     updateItemLinks(container, safeUrl);
+  }
+
+  function waitForVideoReady(videoEl, timeoutMs = 8000) {
+    if (!videoEl) return Promise.resolve(false);
+    if (videoEl.readyState >= 2) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finalize = (ok) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(Boolean(ok));
+      };
+      const onLoaded = () => finalize(true);
+      const onError = () => finalize(false);
+      const timer = setTimeout(() => finalize(videoEl.readyState >= 2), timeoutMs);
+      const cleanup = () => {
+        clearTimeout(timer);
+        videoEl.removeEventListener('loadeddata', onLoaded);
+        videoEl.removeEventListener('canplay', onLoaded);
+        videoEl.removeEventListener('error', onError);
+      };
+      videoEl.addEventListener('loadeddata', onLoaded);
+      videoEl.addEventListener('canplay', onLoaded);
+      videoEl.addEventListener('error', onError);
+      try {
+        videoEl.load();
+      } catch (e) {
+        finalize(false);
+      }
+    });
+  }
+
+  async function validatePreviewReadiness(version) {
+    if (version !== previewValidationVersion) return false;
+    const item = currentPreviewItem;
+    if (!item) return false;
+    const url = item.dataset.url || '';
+    if (!url) return false;
+    const videoEl = item.querySelector('video');
+    if (!videoEl) return false;
+    const ok = await waitForVideoReady(videoEl);
+    if (!ok) {
+      item.classList.add('is-error');
+    }
+    return ok;
   }
 
   function handleDelta(text) {
@@ -446,7 +511,9 @@
     try {
       taskId = await createVideoTask(authHeader);
     } catch (e) {
+      toast(e && e.message ? e.message : '创建任务失败', 'error');
       setStatus('error', '创建任务失败');
+      setIndeterminate(false);
       startBtn.disabled = false;
       isRunning = false;
       return;
@@ -517,16 +584,28 @@
     setStatus('', '未连接');
   }
 
-  function finishRun(hasError) {
+  async function finishRun(hasError) {
     if (!isRunning) return;
     closeSource();
     isRunning = false;
     setButtons(false);
     stopElapsedTimer();
     if (!hasError) {
-      setStatus('connected', '完成');
+      const version = previewValidationVersion;
+      setStatus('connecting', '完成，校验资源');
+      const ready = await validatePreviewReadiness(version);
+      if (version !== previewValidationVersion) return;
+      if (!ready) {
+        setStatus('error', '完成但资源不可访问');
+        setIndeterminate(false);
+        toast('视频已生成但资源不可访问，请检查代理或网络后重试', 'error');
+      } else {
+        setStatus('connected', '完成');
+        setIndeterminate(false);
+        updateProgress(100);
+      }
+    } else {
       setIndeterminate(false);
-      updateProgress(100);
     }
     if (durationValue && startAt) {
       const seconds = Math.max(0, Math.round((Date.now() - startAt) / 1000));

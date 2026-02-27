@@ -28,6 +28,7 @@ DEFAULT_REFRESH_INTERVAL_HOURS = 8
 DEFAULT_RELOAD_INTERVAL_SEC = 30
 DEFAULT_SAVE_DELAY_MS = 500
 DEFAULT_USAGE_FLUSH_INTERVAL_SEC = 5
+DEFAULT_CF_CHALLENGE_PAUSE_SEC = 900
 
 SUPER_POOL_NAME = "ssoSuper"
 BASIC_POOL_NAME = "ssoBasic"
@@ -60,6 +61,40 @@ class TokenManager:
         self._last_usage_flush_at = 0.0
         self._dirty_tokens = {}
         self._dirty_deletes = set()
+        self._refresh_pause_until = 0.0
+        self._refresh_pause_reason = ""
+
+    def get_refresh_state(self) -> Dict[str, object]:
+        """获取自动刷新暂停状态。"""
+        remaining = int(max(0.0, self._refresh_pause_until - time.monotonic()))
+        paused = remaining > 0
+        return {
+            "paused": paused,
+            "remaining_sec": remaining,
+            "reason": self._refresh_pause_reason if paused else "",
+        }
+
+    def pause_auto_refresh(self, seconds: int, reason: str) -> None:
+        """暂停自动刷新。"""
+        try:
+            seconds = int(seconds)
+        except Exception:
+            seconds = DEFAULT_CF_CHALLENGE_PAUSE_SEC
+        seconds = max(60, seconds)
+        self._refresh_pause_until = max(
+            self._refresh_pause_until, time.monotonic() + seconds
+        )
+        self._refresh_pause_reason = str(reason or "manual_pause")
+        state = self.get_refresh_state()
+        logger.warning(
+            "Token auto refresh paused: "
+            f"reason={state['reason']}, remaining={state['remaining_sec']}s"
+        )
+
+    def clear_auto_refresh_pause(self) -> None:
+        """清除自动刷新暂停状态。"""
+        self._refresh_pause_until = 0.0
+        self._refresh_pause_reason = ""
 
     @classmethod
     async def get_instance(cls) -> "TokenManager":
@@ -445,7 +480,8 @@ class TokenManager:
         fallback_effort: EffortType = EffortType.LOW,
         consume_on_fail: bool = True,
         is_usage: bool = True,
-    ) -> bool:
+        return_detail: bool = False,
+    ) -> bool | Dict[str, object]:
         """
         同步 Token 用量
 
@@ -456,9 +492,10 @@ class TokenManager:
             fallback_effort: 降级时的消耗力度
             consume_on_fail: 失败时是否降级扣费
             is_usage: 是否记录为一次使用（影响 use_count）
+            return_detail: 是否返回详细结果
 
         Returns:
-            是否成功
+            是否成功；当 return_detail=True 时返回详细字典
         """
         raw_token = token_str.replace("sso=", "")
 
@@ -473,9 +510,20 @@ class TokenManager:
 
         if not target_token:
             logger.warning(f"Token {raw_token[:10]}...: not found for sync")
+            if return_detail:
+                return {
+                    "ok": False,
+                    "source": "none",
+                    "error_code": "token_not_found",
+                    "status": None,
+                    "message": "token_not_found",
+                }
             return False
 
         # 尝试 API 同步
+        last_error_code = None
+        last_status = None
+        last_error_message = ""
         try:
             usage_service = UsageService()
             result = await usage_service.get(token_str)
@@ -504,17 +552,30 @@ class TokenManager:
                         target_token, target_pool_name, change_kind
                     )
                 self._schedule_save()
+                if return_detail:
+                    return {
+                        "ok": True,
+                        "source": "api",
+                        "error_code": None,
+                        "status": 200,
+                        "remaining_tokens": new_quota,
+                    }
                 return True
 
         except Exception as e:
             if isinstance(e, UpstreamException):
-                status = None
-                if e.details and "status" in e.details:
-                    status = e.details["status"]
-                else:
+                details = e.details or {}
+                status = details.get("status")
+                if status is None:
                     status = getattr(e, "status_code", None)
+                last_status = status
+                last_error_code = details.get("error_code") or "upstream_error"
+                last_error_message = str(e)
                 if status == 401:
                     await self.record_fail(token_str, status, "rate_limits_auth_failed")
+            else:
+                last_error_code = "unknown_error"
+                last_error_message = str(e)
             logger.warning(
                 f"Token {raw_token[:10]}...: API sync failed, fallback to local ({e})"
             )
@@ -522,11 +583,30 @@ class TokenManager:
         # 降级：本地预估扣费
         if consume_on_fail:
             logger.debug(f"Token {raw_token[:10]}...: using local consumption")
-            return await self.consume(token_str, fallback_effort)
+            consumed = await self.consume(token_str, fallback_effort)
+            if return_detail:
+                return {
+                    "ok": bool(consumed),
+                    "source": "local" if consumed else "none",
+                    "fallback": True,
+                    "error_code": last_error_code,
+                    "status": last_status,
+                    "message": last_error_message,
+                }
+            return consumed
         else:
             logger.debug(
                 f"Token {raw_token[:10]}...: sync failed, skipping local consumption"
             )
+            if return_detail:
+                return {
+                    "ok": False,
+                    "source": "api",
+                    "fallback": False,
+                    "error_code": last_error_code or "sync_failed",
+                    "status": last_status,
+                    "message": last_error_message or "sync_failed",
+                }
             return False
 
     async def record_fail(
@@ -775,13 +855,29 @@ class TokenManager:
             return []
         return pool.list()
 
-    async def refresh_cooling_tokens(self) -> Dict[str, int]:
+    async def refresh_cooling_tokens(self) -> Dict[str, object]:
         """
         批量刷新 cooling 状态的 Token 配额
 
         Returns:
-            {"checked": int, "refreshed": int, "recovered": int, "expired": int}
+            {"checked": int, "refreshed": int, "recovered": int, "expired": int, ...}
         """
+        refresh_state = self.get_refresh_state()
+        if refresh_state["paused"]:
+            logger.warning(
+                "Refresh check skipped: auto refresh paused "
+                f"(reason={refresh_state['reason']}, remaining={refresh_state['remaining_sec']}s)"
+            )
+            return {
+                "checked": 0,
+                "refreshed": 0,
+                "recovered": 0,
+                "expired": 0,
+                "paused": True,
+                "pause_reason": refresh_state["reason"],
+                "pause_remaining_sec": refresh_state["remaining_sec"],
+            }
+
         # 收集需要刷新的 token
         to_refresh: List[tuple[str, TokenInfo]] = []
         for pool in self.pools.values():
@@ -845,15 +941,38 @@ class TokenManager:
                             return {
                                 "recovered": new_quota > 0 and old_quota == 0,
                                 "expired": False,
+                                "challenge": False,
                             }
 
-                        return {"recovered": False, "expired": False}
+                        return {"recovered": False, "expired": False, "challenge": False}
 
                     except Exception as e:
+                        if isinstance(e, UpstreamException):
+                            details = e.details or {}
+                            if details.get("error_code") == "cloudflare_challenge":
+                                logger.error(
+                                    f"Token {token_info.token[:10]}...: refresh blocked by Cloudflare challenge"
+                                )
+                                return {
+                                    "recovered": False,
+                                    "expired": False,
+                                    "challenge": True,
+                                }
+
                         error_str = str(e)
+                        status_code = None
+                        if isinstance(e, UpstreamException):
+                            details = e.details or {}
+                            status_code = details.get("status")
+                            if status_code is None:
+                                status_code = getattr(e, "status_code", None)
 
                         # 检查是否为 401 错误
-                        if "401" in error_str or "Unauthorized" in error_str:
+                        if (
+                            status_code == 401
+                            or "401" in error_str
+                            or "Unauthorized" in error_str
+                        ):
                             if retry < 2:
                                 logger.warning(
                                     f"Token {token_info.token[:10]}...: 401 error, "
@@ -868,14 +987,22 @@ class TokenManager:
                                     f"marking as expired"
                                 )
                                 token_info.status = TokenStatus.EXPIRED
-                                return {"recovered": False, "expired": True}
+                                return {
+                                    "recovered": False,
+                                    "expired": True,
+                                    "challenge": False,
+                                }
                         else:
                             logger.warning(
                                 f"Token {token_info.token[:10]}...: refresh failed ({e})"
                             )
-                            return {"recovered": False, "expired": False}
+                            return {
+                                "recovered": False,
+                                "expired": False,
+                                "challenge": False,
+                            }
 
-                return {"recovered": False, "expired": False}
+                return {"recovered": False, "expired": False, "challenge": False}
 
         # 批量处理
         for i in range(0, len(to_refresh), DEFAULT_REFRESH_BATCH_SIZE):
@@ -885,12 +1012,37 @@ class TokenManager:
             recovered += sum(r["recovered"] for r in results)
             expired += sum(r["expired"] for r in results)
 
+            for pool_name, token_info in batch:
+                self._track_token_change(token_info, pool_name, "state")
+
+            challenge_count = sum(1 for r in results if r.get("challenge"))
+            if challenge_count > 0:
+                pause_seconds = get_config(
+                    "token.cf_challenge_pause_sec",
+                    DEFAULT_CF_CHALLENGE_PAUSE_SEC,
+                )
+                self.pause_auto_refresh(pause_seconds, "cloudflare_challenge")
+                await self._save(force=True)
+                state = self.get_refresh_state()
+                logger.error(
+                    "Refresh stopped: Cloudflare challenge detected, "
+                    f"affected={challenge_count}, paused={state['remaining_sec']}s"
+                )
+                return {
+                    "checked": len(to_refresh),
+                    "refreshed": refreshed,
+                    "recovered": recovered,
+                    "expired": expired,
+                    "paused": True,
+                    "pause_reason": "cloudflare_challenge",
+                    "pause_remaining_sec": state["remaining_sec"],
+                    "stopped_by": "cloudflare_challenge",
+                }
+
             # 批次间延迟
             if i + DEFAULT_REFRESH_BATCH_SIZE < len(to_refresh):
                 await asyncio.sleep(1)
 
-        for pool_name, token_info in to_refresh:
-            self._track_token_change(token_info, pool_name, "state")
         await self._save(force=True)
 
         logger.info(

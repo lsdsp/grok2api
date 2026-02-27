@@ -11,6 +11,7 @@ from app.core.exceptions import UpstreamException
 from app.services.token.service import TokenService
 from app.services.reverse.utils.headers import build_headers
 from app.services.reverse.utils.retry import retry_on_status
+from app.services.reverse.utils.transport import request_with_impersonation_fallback
 
 UPLOAD_API = "https://grok.com/rest/app-chat/upload-file"
 
@@ -61,13 +62,16 @@ class AssetsUploadReverse:
             browser = get_config("proxy.browser")
 
             async def _do_request():
-                response = await session.post(
+                response = await request_with_impersonation_fallback(
+                    session,
+                    "post",
                     UPLOAD_API,
+                    browser=browser,
+                    proxies=proxies,
+                    log_prefix="AssetsUploadReverse",
                     headers=headers,
                     json=payload,
-                    proxies=proxies,
                     timeout=timeout,
-                    impersonate=browser,
                 )
                 if response.status_code != 200:
                     logger.error(

@@ -19,6 +19,35 @@ class RateLimitsReverse:
     """/rest/rate-limits reverse interface."""
 
     @staticmethod
+    def _is_cloudflare_challenge(response: Any) -> bool:
+        """Detect Cloudflare challenge pages that should not be retried."""
+        if response.status_code != 403:
+            return False
+
+        content_type = (response.headers.get("content-type") or "").lower()
+        server = (response.headers.get("server") or "").lower()
+        set_cookie = (response.headers.get("set-cookie") or "").lower()
+
+        if "text/html" not in content_type:
+            return False
+        if "cloudflare" not in server and "__cf_bm" not in set_cookie:
+            return False
+
+        body = ""
+        try:
+            body = (response.text or "").lower()
+        except Exception:
+            body = ""
+
+        markers = (
+            "just a moment",
+            "challenges.cloudflare.com",
+            "cf-challenge",
+            "cf browser verification",
+        )
+        return any(marker in body for marker in markers)
+
+    @staticmethod
     async def request(session: AsyncSession, token: str) -> Any:
         """Fetch rate limits from Grok.
 
@@ -61,6 +90,24 @@ class RateLimitsReverse:
                     proxies=proxies,
                     impersonate=browser,
                 )
+
+                if RateLimitsReverse._is_cloudflare_challenge(response):
+                    cf_ray = response.headers.get("cf-ray")
+                    logger.error(
+                        "RateLimitsReverse: Cloudflare challenge blocked request",
+                        extra={"error_type": "UpstreamException", "cf_ray": cf_ray},
+                    )
+                    raise UpstreamException(
+                        message=(
+                            "RateLimitsReverse: Cloudflare challenge blocked request. "
+                            "Set proxy.base_proxy_url and proxy.cf_clearance."
+                        ),
+                        details={
+                            "status": 403,
+                            "error_code": "cloudflare_challenge",
+                            "cf_ray": cf_ray,
+                        },
+                    )
 
                 if response.status_code != 200:
                     logger.error(

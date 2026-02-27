@@ -5,11 +5,11 @@
   const promptInput = document.getElementById('promptInput');
   const ratioSelect = document.getElementById('ratioSelect');
   const concurrentSelect = document.getElementById('concurrentSelect');
+  const quantitySelect = document.getElementById('quantitySelect');
   const autoScrollToggle = document.getElementById('autoScrollToggle');
   const autoDownloadToggle = document.getElementById('autoDownloadToggle');
-  const reverseInsertToggle = document.getElementById('reverseInsertToggle');
   const autoFilterToggle = document.getElementById('autoFilterToggle');
-  const nsfwSelect = document.getElementById('nsfwSelect');
+  const nsfwToggle = document.getElementById('nsfwToggle');
   const selectFolderBtn = document.getElementById('selectFolderBtn');
   const folderPath = document.getElementById('folderPath');
   const statusText = document.getElementById('statusText');
@@ -42,6 +42,11 @@
   let streamSequence = 0;
   const streamImageMap = new Map();
   let finalMinBytesDefault = 100000;
+  let targetCount = 0;
+  let completedCount = 0;
+  let autoStopTriggered = false;
+  const completedImageIds = new Set();
+  let jsZipLoadingPromise = null;
 
   function toast(message, type) {
     if (typeof showToast === 'function') {
@@ -118,8 +123,8 @@
       if (Number.isFinite(value) && value >= 0) {
         finalMinBytesDefault = value;
       }
-      if (nsfwSelect && typeof data.nsfw === 'boolean') {
-        nsfwSelect.value = data.nsfw ? 'true' : 'false';
+      if (nsfwToggle && typeof data.nsfw === 'boolean') {
+        nsfwToggle.checked = data.nsfw;
       }
     } catch (e) {
       // ignore
@@ -143,6 +148,61 @@
   }
 
   function updateError(value) {}
+
+  function parseQuantityLimit(raw) {
+    const value = parseInt(raw, 10);
+    if (!Number.isFinite(value) || value < 0) return 0;
+    return value;
+  }
+
+  function parseConcurrentLimit(raw) {
+    const value = parseInt(raw, 10);
+    if (!Number.isFinite(value) || value < 1) return 1;
+    return value;
+  }
+
+  function getQuantityLimit() {
+    if (!quantitySelect) return 0;
+    return parseQuantityLimit(quantitySelect.value);
+  }
+
+  function getConcurrentLimit() {
+    if (!concurrentSelect) return 1;
+    return parseConcurrentLimit(concurrentSelect.value);
+  }
+
+  function getRoundBatchSize() {
+    const concurrent = getConcurrentLimit();
+    const quantity = getQuantityLimit();
+    if (quantity > 0) {
+      return Math.max(1, Math.min(concurrent, quantity));
+    }
+    return concurrent;
+  }
+
+  function resetQuantityState() {
+    completedCount = 0;
+    autoStopTriggered = false;
+    completedImageIds.clear();
+  }
+
+  function trackCompletedImage(imageId) {
+    if (!isRunning) return;
+    const key = imageId ? String(imageId) : `anon-${Date.now()}-${Math.random()}`;
+    if (completedImageIds.has(key)) return;
+    completedImageIds.add(key);
+    completedCount += 1;
+
+    if (targetCount > 0 && completedCount >= targetCount && !autoStopTriggered) {
+      autoStopTriggered = true;
+      const limitText = `已达数量上限 (${targetCount})`;
+      setStatus('connected', limitText);
+      toast(`已生成 ${completedCount} 张图片，已自动停止`, 'success');
+      Promise.resolve(stopConnection(limitText)).catch(() => {
+        // ignore
+      });
+    }
+  }
 
   function setImageStatus(item, state, label) {
     if (!item) return;
@@ -217,14 +277,20 @@
     }
   }
 
-  async function createImagineTask(prompt, ratio, authHeader, nsfwEnabled) {
+  async function createImagineTask(prompt, ratio, quantity, concurrent, authHeader, nsfwEnabled) {
     const res = await fetch('/v1/public/imagine/start', {
       method: 'POST',
       headers: {
         ...buildAuthHeaders(authHeader),
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ prompt, aspect_ratio: ratio, nsfw: nsfwEnabled })
+      body: JSON.stringify({
+        prompt,
+        aspect_ratio: ratio,
+        nsfw: nsfwEnabled,
+        quantity,
+        concurrent
+      })
     });
     if (!res.ok) {
       const text = await res.text();
@@ -234,16 +300,108 @@
     return data && data.task_id ? String(data.task_id) : '';
   }
 
-  async function createImagineTasks(prompt, ratio, concurrent, authHeader, nsfwEnabled) {
-    const tasks = [];
-    for (let i = 0; i < concurrent; i++) {
-      const taskId = await createImagineTask(prompt, ratio, authHeader, nsfwEnabled);
-      if (!taskId) {
-        throw new Error('Missing task id');
+  function buildImageFilename(prompt, index, fallbackExt = 'png') {
+    const safePrompt = (prompt || 'image').substring(0, 30).replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_');
+    return `${safePrompt}_${index}.${fallbackExt}`;
+  }
+
+  function loadScript(src, timeoutMs = 8000) {
+    return new Promise((resolve, reject) => {
+      const existing = Array.from(document.getElementsByTagName('script')).find(s => s.src === src);
+      if (existing) {
+        if (typeof JSZip !== 'undefined') {
+          resolve(true);
+          return;
+        }
       }
-      tasks.push(taskId);
+      const script = document.createElement('script');
+      script.src = src;
+      script.async = true;
+      const timer = setTimeout(() => {
+        script.remove();
+        reject(new Error(`timeout loading ${src}`));
+      }, timeoutMs);
+      script.onload = () => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      script.onerror = () => {
+        clearTimeout(timer);
+        script.remove();
+        reject(new Error(`failed loading ${src}`));
+      };
+      document.head.appendChild(script);
+    });
+  }
+
+  async function ensureJSZip() {
+    if (typeof JSZip !== 'undefined') {
+      return true;
     }
-    return tasks;
+    if (jsZipLoadingPromise) {
+      return jsZipLoadingPromise;
+    }
+    jsZipLoadingPromise = (async () => {
+      const sources = [
+        'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',
+        'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js',
+        'https://unpkg.com/jszip@3.10.1/dist/jszip.min.js'
+      ];
+      for (const src of sources) {
+        try {
+          await loadScript(src);
+          if (typeof JSZip !== 'undefined') {
+            return true;
+          }
+        } catch (e) {
+          // try next source
+        }
+      }
+      return typeof JSZip !== 'undefined';
+    })();
+    try {
+      return await jsZipLoadingPromise;
+    } finally {
+      jsZipLoadingPromise = null;
+    }
+  }
+
+  async function downloadSelectedImagesIndividually() {
+    let processed = 0;
+    for (const item of selectedImages) {
+      const url = item.dataset.imageUrl;
+      const prompt = item.dataset.prompt || 'image';
+      try {
+        let blob = null;
+        if (url && url.startsWith('data:')) {
+          blob = dataUrlToBlob(url);
+        } else if (url) {
+          const response = await fetch(url);
+          blob = await response.blob();
+        }
+        if (!blob) {
+          throw new Error('empty blob');
+        }
+        const ext = (blob.type && blob.type.includes('jpeg')) ? 'jpg' : (blob.type && blob.type.includes('webp')) ? 'webp' : 'png';
+        const filename = buildImageFilename(prompt, processed + 1, ext);
+        const href = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = href;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(href);
+        processed++;
+        if (downloadSelectedBtn) {
+          downloadSelectedBtn.innerHTML = `下载中... (${processed}/${selectedImages.size})`;
+        }
+        await new Promise(r => setTimeout(r, 120));
+      } catch (error) {
+        console.error('Failed to download image:', error);
+      }
+    }
+    return processed;
   }
 
   async function stopImagineTasks(taskIds, authHeader) {
@@ -306,12 +464,12 @@
   }
 
   function appendImage(base64, meta) {
-    if (!waterfall) return;
+    if (!waterfall) return false;
     if (autoFilterToggle && autoFilterToggle.checked) {
       const bytes = estimateBase64Bytes(base64 || '');
       const minBytes = getFinalMinBytes();
       if (bytes !== null && bytes < minBytes) {
-        return;
+        return false;
       }
     }
     if (emptyState) {
@@ -364,18 +522,10 @@
       item.classList.add('selection-mode');
     }
     
-    if (reverseInsertToggle && reverseInsertToggle.checked) {
-      waterfall.prepend(item);
-    } else {
-      waterfall.appendChild(item);
-    }
+    waterfall.appendChild(item);
 
     if (autoScrollToggle && autoScrollToggle.checked) {
-      if (reverseInsertToggle && reverseInsertToggle.checked) {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      } else {
-        window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-      }
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
     }
 
     if (autoDownloadToggle && autoDownloadToggle.checked) {
@@ -392,6 +542,7 @@
         downloadImage(base64, filename);
       }
     }
+    return true;
   }
 
   function upsertStreamImage(raw, meta, imageId, isFinal) {
@@ -478,11 +629,7 @@
         item.classList.add('selection-mode');
       }
 
-      if (reverseInsertToggle && reverseInsertToggle.checked) {
-        waterfall.prepend(item);
-      } else {
-        waterfall.appendChild(item);
-      }
+      waterfall.appendChild(item);
 
       if (imageId) {
         streamImageMap.set(imageId, item);
@@ -506,11 +653,7 @@
     updateError('');
 
     if (isNew && autoScrollToggle && autoScrollToggle.checked) {
-      if (reverseInsertToggle && reverseInsertToggle.checked) {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      } else {
-        window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-      }
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
     }
 
     if (isFinal && autoDownloadToggle && autoDownloadToggle.checked) {
@@ -545,21 +688,43 @@
       }
       const isFinal = data.type === 'image_generation.completed' || data.stage === 'final';
       upsertStreamImage(payload, data, imageId, isFinal);
+      if (isFinal && (streamImageMap.has(imageId) || streamImageMap.has(String(imageId)))) {
+        trackCompletedImage(imageId);
+      }
     } else if (data.type === 'image') {
+      const added = appendImage(data.b64_json, data);
+      if (!added) {
+        return;
+      }
       imageCount += 1;
       updateCount(imageCount);
       updateLatency(data.elapsed_ms);
       updateError('');
-      appendImage(data.b64_json, data);
+      trackCompletedImage(data.image_id || data.imageId || null);
     } else if (data.type === 'status') {
       if (data.status === 'running') {
         setStatus('connected', '生成中');
         lastRunId = data.run_id || '';
+      } else if (data.status === 'round_done') {
+        if (data.run_id && lastRunId && data.run_id !== lastRunId) {
+          return;
+        }
+        setStatus('connected', '生成中');
       } else if (data.status === 'stopped') {
         if (data.run_id && lastRunId && data.run_id !== lastRunId) {
           return;
         }
-        setStatus('', '已停止');
+        const reason = String(data.reason || '');
+        if (reason === 'quantity_reached') {
+          setStatus('', '已达数量上限');
+        } else {
+          setStatus('', '已停止');
+        }
+        isRunning = false;
+        currentTaskIds = [];
+        setButtons(false);
+        startBtn.disabled = false;
+        updateModeValue();
       }
     } else if (data.type === 'error' || data.error) {
       const message = data.message || (data.error && data.error.message) || '生成失败';
@@ -609,56 +774,51 @@
     return authHeader;
   }
 
-  function buildSseUrl(taskId, index, rawPublicKey) {
+  function buildSseUrl(taskId, rawPublicKey) {
     const httpProtocol = window.location.protocol === 'https:' ? 'https' : 'http';
     const base = `${httpProtocol}://${window.location.host}/v1/public/imagine/sse`;
     const params = new URLSearchParams();
     params.set('task_id', taskId);
     params.set('t', String(Date.now()));
-    if (typeof index === 'number') {
-      params.set('conn', String(index));
-    }
     if (rawPublicKey) {
       params.set('public_key', rawPublicKey);
     }
     return `${base}?${params.toString()}`;
   }
 
-  function startSSE(taskIds, rawPublicKey) {
+  function startSSE(taskId, rawPublicKey, batchSize) {
     connectionMode = 'sse';
     stopAllConnections();
     updateModeValue();
 
     setStatus('connected', '生成中 (SSE)');
     setButtons(true);
-    toast(`已启动 ${taskIds.length} 个并发任务 (SSE)`, 'success');
+    toast(`已启动单任务模式，每轮请求 ${batchSize} 张 (SSE)`, 'success');
 
-    for (let i = 0; i < taskIds.length; i++) {
-      const url = buildSseUrl(taskIds[i], i, rawPublicKey);
-      const es = new EventSource(url);
+    const url = buildSseUrl(taskId, rawPublicKey);
+    const es = new EventSource(url);
 
-      es.onopen = () => {
-        updateActive();
-      };
+    es.onopen = () => {
+      updateActive();
+    };
 
-      es.onmessage = (event) => {
-        handleMessage(event.data);
-      };
+    es.onmessage = (event) => {
+      handleMessage(event.data);
+    };
 
-      es.onerror = () => {
-        updateActive();
-        const remaining = sseConnections.filter(e => e && e.readyState === EventSource.OPEN).length;
-        if (remaining === 0) {
-          setStatus('error', '连接错误');
-          setButtons(false);
-          isRunning = false;
-          startBtn.disabled = false;
-          updateModeValue();
-        }
-      };
+    es.onerror = () => {
+      updateActive();
+      const remaining = sseConnections.filter(e => e && e.readyState === EventSource.OPEN).length;
+      if (remaining === 0 && isRunning) {
+        setStatus('error', '连接错误');
+        setButtons(false);
+        isRunning = false;
+        startBtn.disabled = false;
+        updateModeValue();
+      }
+    };
 
-      sseConnections.push(es);
-    }
+    sseConnections.push(es);
   }
 
   async function startConnection() {
@@ -676,9 +836,10 @@
     }
     const rawPublicKey = normalizeAuthHeader(authHeader);
 
-    const concurrent = concurrentSelect ? parseInt(concurrentSelect.value, 10) : 1;
     const ratio = ratioSelect ? ratioSelect.value : '2:3';
-    const nsfwEnabled = nsfwSelect ? nsfwSelect.value === 'true' : true;
+    const quantity = getQuantityLimit();
+    const batchSize = getRoundBatchSize();
+    const nsfwEnabled = nsfwToggle ? nsfwToggle.checked : true;
     
     if (isRunning) {
       toast('已在运行中', 'warning');
@@ -686,6 +847,8 @@
     }
 
     isRunning = true;
+    targetCount = quantity;
+    resetQuantityState();
     setStatus('connecting', '连接中');
     startBtn.disabled = true;
 
@@ -694,19 +857,31 @@
       pendingFallbackTimer = null;
     }
 
-    let taskIds = [];
+    let taskId = '';
     try {
-      taskIds = await createImagineTasks(prompt, ratio, concurrent, authHeader, nsfwEnabled);
+      taskId = await createImagineTask(
+        prompt,
+        ratio,
+        quantity,
+        batchSize,
+        authHeader,
+        nsfwEnabled
+      );
+      if (!taskId) {
+        throw new Error('Missing task id');
+      }
     } catch (e) {
       setStatus('error', '创建任务失败');
       startBtn.disabled = false;
       isRunning = false;
+      targetCount = 0;
+      resetQuantityState();
       return;
     }
-    currentTaskIds = taskIds;
+    currentTaskIds = [taskId];
 
     if (modePreference === 'sse') {
-      startSSE(taskIds, rawPublicKey);
+      startSSE(taskId, rawPublicKey, batchSize);
       return;
     }
 
@@ -721,72 +896,67 @@
       fallbackTimer = setTimeout(() => {
         if (!fallbackDone && opened === 0) {
           fallbackDone = true;
-          startSSE(taskIds, rawPublicKey);
+          startSSE(taskId, rawPublicKey, batchSize);
         }
       }, 1500);
     }
     pendingFallbackTimer = fallbackTimer;
 
     wsConnections = [];
-
-    for (let i = 0; i < taskIds.length; i++) {
-      const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const params = new URLSearchParams({ task_id: taskIds[i] });
-      if (rawPublicKey) {
-        params.set('public_key', rawPublicKey);
-      }
-      const wsUrl = `${protocol}://${window.location.host}/v1/public/imagine/ws?${params.toString()}`;
-      const ws = new WebSocket(wsUrl);
-
-      ws.onopen = () => {
-        opened += 1;
-        updateActive();
-        if (i === 0) {
-          setStatus('connected', '生成中');
-          setButtons(true);
-          toast(`已启动 ${concurrent} 个并发任务`, 'success');
-        }
-        sendStart(prompt, ws);
-      };
-
-      ws.onmessage = (event) => {
-        handleMessage(event.data);
-      };
-
-      ws.onclose = () => {
-        updateActive();
-        if (connectionMode !== 'ws') {
-          return;
-        }
-        const remaining = wsConnections.filter(w => w && w.readyState === WebSocket.OPEN).length;
-        if (remaining === 0 && !fallbackDone) {
-          setStatus('', '未连接');
-          setButtons(false);
-          isRunning = false;
-          updateModeValue();
-        }
-      };
-
-      ws.onerror = () => {
-        updateActive();
-        if (modePreference === 'auto' && opened === 0 && !fallbackDone) {
-          fallbackDone = true;
-          if (fallbackTimer) {
-            clearTimeout(fallbackTimer);
-          }
-          startSSE(taskIds, rawPublicKey);
-          return;
-        }
-        if (i === 0 && wsConnections.filter(w => w && w.readyState === WebSocket.OPEN).length === 0) {
-          setStatus('error', '连接错误');
-          startBtn.disabled = false;
-          isRunning = false;
-          updateModeValue();
-        }
-      };
-
-      wsConnections.push(ws);
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const params = new URLSearchParams({ task_id: taskId });
+    if (rawPublicKey) {
+      params.set('public_key', rawPublicKey);
     }
+    const wsUrl = `${protocol}://${window.location.host}/v1/public/imagine/ws?${params.toString()}`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      opened += 1;
+      updateActive();
+      setStatus('connected', '生成中');
+      setButtons(true);
+      toast(`已启动单任务模式，每轮请求 ${batchSize} 张`, 'success');
+      sendStart(prompt, ws);
+    };
+
+    ws.onmessage = (event) => {
+      handleMessage(event.data);
+    };
+
+    ws.onclose = () => {
+      updateActive();
+      if (connectionMode !== 'ws') {
+        return;
+      }
+      const remaining = wsConnections.filter(w => w && w.readyState === WebSocket.OPEN).length;
+      if (remaining === 0 && !fallbackDone && isRunning) {
+        setStatus('', '未连接');
+        setButtons(false);
+        isRunning = false;
+        updateModeValue();
+      }
+    };
+
+    ws.onerror = () => {
+      updateActive();
+      if (modePreference === 'auto' && opened === 0 && !fallbackDone) {
+        fallbackDone = true;
+        if (fallbackTimer) {
+          clearTimeout(fallbackTimer);
+        }
+        startSSE(taskId, rawPublicKey, batchSize);
+        return;
+      }
+      if (wsConnections.filter(w => w && w.readyState === WebSocket.OPEN).length === 0 && isRunning) {
+        setStatus('error', '连接错误');
+        startBtn.disabled = false;
+        isRunning = false;
+        updateModeValue();
+      }
+    };
+
+    wsConnections.push(ws);
   }
 
   function sendStart(promptOverride, targetWs) {
@@ -794,18 +964,22 @@
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const prompt = promptOverride || (promptInput ? promptInput.value.trim() : '');
     const ratio = ratioSelect ? ratioSelect.value : '2:3';
-    const nsfwEnabled = nsfwSelect ? nsfwSelect.value === 'true' : true;
+    const quantity = getQuantityLimit();
+    const concurrent = getRoundBatchSize();
+    const nsfwEnabled = nsfwToggle ? nsfwToggle.checked : true;
     const payload = {
       type: 'start',
       prompt,
       aspect_ratio: ratio,
-      nsfw: nsfwEnabled
+      nsfw: nsfwEnabled,
+      quantity,
+      concurrent
     };
     ws.send(JSON.stringify(payload));
     updateError('');
   }
 
-  async function stopConnection() {
+  async function stopConnection(finalStatusText = '') {
     if (pendingFallbackTimer) {
       clearTimeout(pendingFallbackTimer);
       pendingFallbackTimer = null;
@@ -819,10 +993,16 @@
     stopAllConnections();
     currentTaskIds = [];
     isRunning = false;
+    targetCount = 0;
+    resetQuantityState();
     updateActive();
     updateModeValue();
     setButtons(false);
-    setStatus('', '未连接');
+    if (finalStatusText) {
+      setStatus('', finalStatusText);
+    } else {
+      setStatus('', '未连接');
+    }
   }
 
   function clearImages() {
@@ -837,6 +1017,8 @@
     updateCount(imageCount);
     updateLatency('');
     updateError('');
+    targetCount = 0;
+    resetQuantityState();
     if (emptyState) {
       emptyState.style.display = 'block';
     }
@@ -1063,24 +1245,31 @@
       return;
     }
     
-    if (typeof JSZip === 'undefined') {
-      toast('JSZip 库加载失败，请刷新页面重试', 'error');
-      return;
-    }
-    
-    toast(`正在打包 ${selectedImages.size} 张图片...`, 'info');
+    toast(`正在处理 ${selectedImages.size} 张图片...`, 'info');
     downloadSelectedBtn.disabled = true;
-    downloadSelectedBtn.textContent = '打包中...';
-    
-    const zip = new JSZip();
-    const imgFolder = zip.folder('images');
-    let processed = 0;
+    downloadSelectedBtn.textContent = '准备中...';
     
     try {
+      const hasZip = await ensureJSZip();
+      if (!hasZip) {
+        const processed = await downloadSelectedImagesIndividually();
+        if (processed === 0) {
+          toast('下载失败，未获取到可用图片', 'error');
+          return;
+        }
+        toast(`JSZip 不可用，已逐张下载 ${processed} 张图片`, 'warning');
+        exitSelectionMode();
+        return;
+      }
+
+      const zip = new JSZip();
+      const imgFolder = zip.folder('images');
+      let processed = 0;
+
       for (const item of selectedImages) {
         const url = item.dataset.imageUrl;
         const prompt = item.dataset.prompt || 'image';
-        
+
         try {
           let blob = null;
           if (url && url.startsWith('data:')) {
@@ -1092,33 +1281,31 @@
           if (!blob) {
             throw new Error('empty blob');
           }
-          const filename = `${prompt.substring(0, 30).replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')}_${processed + 1}.png`;
+          const ext = (blob.type && blob.type.includes('jpeg')) ? 'jpg' : (blob.type && blob.type.includes('webp')) ? 'webp' : 'png';
+          const filename = buildImageFilename(prompt, processed + 1, ext);
           imgFolder.file(filename, blob);
           processed++;
-          
-          // Update progress
+
           downloadSelectedBtn.innerHTML = `打包中... (${processed}/${selectedImages.size})`;
         } catch (error) {
           console.error('Failed to fetch image:', error);
         }
       }
-      
+
       if (processed === 0) {
         toast('没有成功获取任何图片', 'error');
         return;
       }
-      
-      // Generate zip file
+
       downloadSelectedBtn.textContent = '生成压缩包...';
       const content = await zip.generateAsync({ type: 'blob' });
-      
-      // Download zip
+
       const link = document.createElement('a');
       link.href = URL.createObjectURL(content);
       link.download = `imagine_${new Date().toISOString().slice(0, 10)}_${Date.now()}.zip`;
       link.click();
       URL.revokeObjectURL(link.href);
-      
+
       toast(`成功打包 ${processed} 张图片`, 'success');
       exitSelectionMode();
     } catch (error) {

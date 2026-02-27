@@ -19,8 +19,22 @@ Grok2API rebuilt with **FastAPI**, fully aligned with the latest web call format
 ### Local
 
 ```bash
+cp .env.example .env
 uv sync
 uv run main.py
+```
+
+On Windows (recommended for paths with spaces):
+
+```powershell
+uv sync
+.\scripts\start-local.ps1
+```
+
+If PowerShell execution policy blocks scripts:
+
+```cmd
+scripts\start-local.cmd
 ```
 
 ### Docker Compose

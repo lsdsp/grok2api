@@ -19,8 +19,22 @@
 ### 本地开发
 
 ```bash
+cp .env.example .env
 uv sync
 uv run main.py
+```
+
+Windows（路径包含空格时推荐）：
+
+```powershell
+uv sync
+.\scripts\start-local.ps1
+```
+
+如遇执行策略限制，可用：
+
+```cmd
+scripts\start-local.cmd
 ```
 
 ### Docker Compose

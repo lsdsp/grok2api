@@ -30,6 +30,14 @@
           <p class="text-[var(--accents-4)] mt-1 text-sm">管理 Grok2API 的 Token 服务号池。</p>
         </div>
         <div class="flex items-center gap-3">
+          <button onclick="openCfClearanceModal()" class="geist-button-outline gap-2">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 12h14"></path>
+              <path d="M12 5v14"></path>
+            </svg>
+            更新 CF
+          </button>
           <button onclick="openImportModal()" class="geist-button-outline gap-2">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
               stroke-linecap="round" stroke-linejoin="round">
@@ -278,6 +286,37 @@
     </div>
   </div>
 
+  <!-- CF Clearance Modal -->
+  <div id="cf-clearance-modal" class="modal-overlay hidden">
+    <div class="modal-content modal-lg">
+      <div class="modal-header">
+        <h3 class="modal-title">更新 Cloudflare Clearance</h3>
+        <button onclick="closeCfClearanceModal()" class="modal-close">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      <div class="space-y-4">
+        <div>
+          <label class="modal-label mb-1 block">cf_clearance</label>
+          <textarea id="cf-clearance-input" class="geist-input font-mono h-32"
+            placeholder="粘贴浏览器中的 cf_clearance 值"></textarea>
+        </div>
+        <div>
+          <label class="modal-label mb-1 block">User-Agent（可选）</label>
+          <input id="cf-user-agent-input" type="text" class="geist-input"
+            placeholder="例如：Mozilla/5.0 ... Firefox/148.0" />
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+          <button onclick="closeCfClearanceModal()" class="geist-button-outline text-xs px-3">取消</button>
+          <button id="cf-save-btn" onclick="saveCfClearance()" class="geist-button text-xs px-3">保存并生效</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="confirm-dialog" class="modal-overlay confirm-dialog hidden">
     <div class="modal-content modal-md">
       <div class="confirm-dialog-body">
@@ -297,7 +336,7 @@
   <script src="/static/common/js/header.js?v=1.5.0"></script>
   <script src="/static/common/js/footer.js?v=1.5.0"></script>
   <script src="/static/common/js/toast.js"></script>
-  <script src="/static/admin/js/token.js?v=1.5.0"></script>
+  <script src="/static/admin/js/token.js?v=1.5.1"></script>
 </body>
 
 </html>

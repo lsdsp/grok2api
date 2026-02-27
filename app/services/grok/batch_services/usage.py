@@ -70,12 +70,19 @@ class UsageService:
         tokens: List[str],
         mgr,
         *,
+        include_detail: bool = False,
         on_item: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         batch_size = get_config("usage.batch_size")
+
         async def _refresh_one(t: str):
-            return await mgr.sync_usage(t, consume_on_fail=False, is_usage=False)
+            return await mgr.sync_usage(
+                t,
+                consume_on_fail=False,
+                is_usage=False,
+                return_detail=include_detail,
+            )
 
         return await run_batch(
             tokens,

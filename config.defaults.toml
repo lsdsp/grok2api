@@ -49,7 +49,8 @@ user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36
 # 最大重试次数
 max_retry = 3
 # 触发重试的 HTTP 状态码
-retry_status_codes = [401,429,403]
+# 403 常见于 Cloudflare challenge，不应重试，避免重试风暴
+retry_status_codes = [401,429]
 # 触发重建 session 的 HTTP 状态码（用于轮换代理）
 reset_session_status_codes = [403]
 # 退避基础延迟（秒）

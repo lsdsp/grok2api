@@ -20,9 +20,11 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+agents.md
 
 # Virtual Environment
 .venv/
+.venv*/
 venv/
 ENV/
 env/
@@ -55,3 +57,4 @@ htmlcov/
 
 # Project specific
 config.local.toml
+.tmp/

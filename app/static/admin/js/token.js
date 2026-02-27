@@ -12,6 +12,7 @@ let currentBatchTaskId = null;
 let batchEventSource = null;
 let currentPage = 1;
 let pageSize = 50;
+let isUpdatingCfClearance = false;
 
 const byId = (id) => document.getElementById(id);
 const qsa = (selector) => document.querySelectorAll(selector);
@@ -66,6 +67,91 @@ async function readJsonResponse(res) {
     return JSON.parse(text);
   } catch (err) {
     throw new Error(`响应不是有效 JSON (HTTP ${res.status})`);
+  }
+}
+
+function extractChallengeInfo(payload) {
+  const target = payload && payload.result ? payload.result : payload;
+  const challenge = target && target.challenge ? target.challenge : null;
+  const errorCode = target && target.error_code ? target.error_code : '';
+  const blocked = Boolean(
+    errorCode === 'cloudflare_challenge' ||
+    (challenge && challenge.blocked === true)
+  );
+  const count = challenge && typeof challenge.count === 'number' ? challenge.count : 0;
+  return { blocked, count, errorCode };
+}
+
+async function maybePromptCfClearanceUpdate() {
+  const ok = await confirmAction(
+    '检测到 Cloudflare Challenge，是否现在更新 cf_clearance？',
+    { okText: '立即更新' }
+  );
+  if (!ok) return;
+  openCfClearanceModal();
+}
+
+function openCfClearanceModal() {
+  const input = byId('cf-clearance-input');
+  const uaInput = byId('cf-user-agent-input');
+  if (input) input.value = '';
+  if (uaInput) uaInput.value = '';
+  openModal('cf-clearance-modal');
+}
+
+function closeCfClearanceModal() {
+  closeModal('cf-clearance-modal');
+}
+
+async function saveCfClearance() {
+  if (isUpdatingCfClearance) return;
+  const clearanceInput = byId('cf-clearance-input');
+  const uaInput = byId('cf-user-agent-input');
+  const saveBtn = byId('cf-save-btn');
+
+  const cfClearance = clearanceInput ? clearanceInput.value.trim() : '';
+  const userAgent = uaInput ? uaInput.value.trim() : '';
+
+  if (!cfClearance) {
+    showToast('cf_clearance 不能为空', 'error');
+    return;
+  }
+
+  isUpdatingCfClearance = true;
+  if (saveBtn) {
+    saveBtn.disabled = true;
+    saveBtn.innerText = '保存中...';
+  }
+
+  try {
+    const res = await fetch('/v1/admin/config/proxy/cf_clearance', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAuthHeaders(apiKey)
+      },
+      body: JSON.stringify({
+        cf_clearance: cfClearance,
+        user_agent: userAgent || undefined
+      })
+    });
+
+    const data = await readJsonResponse(res);
+    if (!res.ok || !data || data.status !== 'success') {
+      const detail = data && (data.detail || data.message);
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
+
+    closeCfClearanceModal();
+    showToast('cf_clearance 已更新并生效，请重试刷新', 'success');
+  } catch (e) {
+    showToast(`更新失败: ${e.message || e}`, 'error');
+  } finally {
+    isUpdatingCfClearance = false;
+    if (saveBtn) {
+      saveBtn.disabled = false;
+      saveBtn.innerText = '保存并生效';
+    }
   }
 }
 
@@ -631,9 +717,16 @@ async function refreshStatus(token) {
       body: JSON.stringify({ token: token })
     });
 
-    const data = await res.json();
+    const data = await readJsonResponse(res);
 
-    if (res.ok && data.status === 'success') {
+    if (res.ok && data && data.status === 'success') {
+      const challenge = extractChallengeInfo(data);
+      if (challenge.blocked) {
+        showToast('刷新失败：请求被 Cloudflare 验证拦截', 'error');
+        await maybePromptCfClearanceUpdate();
+        return;
+      }
+
       const isSuccess = data.results && data.results[token];
       loadData();
 
@@ -643,7 +736,8 @@ async function refreshStatus(token) {
         showToast('刷新失败', 'error');
       }
     } else {
-      showToast('刷新失败', 'error');
+      const detail = data && (data.detail || data.message);
+      showToast(detail ? `刷新失败: ${detail}` : '刷新失败', 'error');
     }
   } catch (e) {
     console.error(e);
@@ -699,10 +793,24 @@ async function startBatchRefresh() {
           batchProcessed = batchTotal;
           updateBatchProgress();
           finishBatchProcess(false, { silent: true });
-          if (msg.warning) {
+          const summary = msg.result && msg.result.summary ? msg.result.summary : null;
+          const total = summary && typeof summary.total === 'number' ? summary.total : batchTotal;
+          const okCount = summary && typeof summary.ok === 'number' ? summary.ok : (typeof msg.ok === 'number' ? msg.ok : 0);
+          const failCount = summary && typeof summary.fail === 'number' ? summary.fail : (typeof msg.fail === 'number' ? msg.fail : Math.max(0, total - okCount));
+          const resultStatus = msg.result && msg.result.result_status ? msg.result.result_status : null;
+          const challenge = extractChallengeInfo(msg.result || msg);
+
+          if (challenge.blocked) {
+            showToast(`刷新失败：检测到 Cloudflare Challenge（失败 ${failCount}）`, 'error');
+            void maybePromptCfClearanceUpdate();
+          } else if (msg.warning) {
             showToast(`刷新完成\n⚠️ ${msg.warning}`, 'warning');
+          } else if (resultStatus === 'failed' || (total > 0 && failCount >= total)) {
+            showToast(`刷新失败：成功 ${okCount}，失败 ${failCount}`, 'error');
+          } else if (resultStatus === 'partial' || failCount > 0) {
+            showToast(`刷新部分成功：成功 ${okCount}，失败 ${failCount}`, 'warning');
           } else {
-            showToast('刷新完成', 'success');
+            showToast(`刷新完成：成功 ${okCount}，失败 ${failCount}`, 'success');
           }
           currentBatchTaskId = null;
           BatchSSE.close(batchEventSource);
@@ -715,7 +823,11 @@ async function startBatchRefresh() {
           batchEventSource = null;
         } else if (msg.type === 'error') {
           finishBatchProcess(true, { silent: true });
-          showToast('刷新失败: ' + (msg.error || '未知错误'), 'error');
+          const errMsg = msg.error || '未知错误';
+          showToast('刷新失败: ' + errMsg, 'error');
+          if (String(errMsg).includes('cloudflare_challenge')) {
+            void maybePromptCfClearanceUpdate();
+          }
           currentBatchTaskId = null;
           BatchSSE.close(batchEventSource);
           batchEventSource = null;

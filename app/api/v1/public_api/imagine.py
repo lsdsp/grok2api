@@ -61,7 +61,55 @@ def _parse_sse_chunk(chunk: str) -> Optional[Dict[str, Any]]:
     return payload
 
 
-async def _new_session(prompt: str, aspect_ratio: str, nsfw: Optional[bool]) -> str:
+def _normalize_quantity(value: Any, default: int = 0) -> int:
+    if value is None:
+        return default
+    try:
+        quantity = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("quantity must be an integer")
+    if quantity < 0 or quantity > 200:
+        raise ValueError("quantity must be between 0 and 200")
+    return quantity
+
+
+def _normalize_concurrent(value: Any, default: int = 1) -> int:
+    if value is None:
+        return default
+    try:
+        concurrent = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("concurrent must be an integer")
+    if concurrent < 1 or concurrent > 6:
+        raise ValueError("concurrent must be between 1 and 6")
+    return concurrent
+
+
+def _is_final_image_payload(payload: Dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    payload_type = str(payload.get("type") or "")
+    if payload_type == "image_generation.completed":
+        return True
+    if payload_type == "image" and (
+        payload.get("b64_json") or payload.get("url") or payload.get("image")
+    ):
+        return True
+    stage = str(payload.get("stage") or "").lower()
+    if stage == "final" and (
+        payload.get("b64_json") or payload.get("url") or payload.get("image")
+    ):
+        return True
+    return False
+
+
+async def _new_session(
+    prompt: str,
+    aspect_ratio: str,
+    nsfw: Optional[bool],
+    quantity: int,
+    concurrent: int,
+) -> str:
     task_id = uuid.uuid4().hex
     now = time.time()
     async with _IMAGINE_SESSIONS_LOCK:
@@ -70,6 +118,8 @@ async def _new_session(prompt: str, aspect_ratio: str, nsfw: Optional[bool]) -> 
             "prompt": prompt,
             "aspect_ratio": aspect_ratio,
             "nsfw": nsfw,
+            "quantity": quantity,
+            "concurrent": concurrent,
             "created_at": now,
         }
     return task_id
@@ -156,7 +206,13 @@ async def public_imagine_ws(websocket: WebSocket):
         run_task = None
         stop_event.clear()
 
-    async def _run(prompt: str, aspect_ratio: str, nsfw: Optional[bool]):
+    async def _run(
+        prompt: str,
+        aspect_ratio: str,
+        nsfw: Optional[bool],
+        quantity: int = 0,
+        concurrent: int = 1,
+    ):
         model_id = "grok-imagine-1.0"
         model_info = ModelService.get(model_id)
         if not model_info or not model_info.is_image:
@@ -171,6 +227,11 @@ async def public_imagine_ws(websocket: WebSocket):
 
         token_mgr = await get_token_manager()
         run_id = uuid.uuid4().hex
+        final_count = 0
+        target_count = max(0, int(quantity or 0))
+        batch_size = max(1, int(concurrent or 1))
+        stop_reason = "stopped"
+        round_index = 0
 
         await _send(
             {
@@ -179,11 +240,25 @@ async def public_imagine_ws(websocket: WebSocket):
                 "prompt": prompt,
                 "aspect_ratio": aspect_ratio,
                 "run_id": run_id,
+                "target_count": target_count,
+                "batch_size": batch_size,
             }
         )
 
         while not stop_event.is_set():
             try:
+                if target_count > 0 and final_count >= target_count:
+                    stop_reason = "quantity_reached"
+                    break
+
+                round_index += 1
+                remaining = (
+                    target_count - final_count if target_count > 0 else batch_size
+                )
+                request_n = (
+                    batch_size if target_count <= 0 else max(1, min(batch_size, remaining))
+                )
+
                 await token_mgr.reload_if_stale()
                 token = None
                 for pool_name in ModelService.pool_candidates_for_model(
@@ -209,7 +284,7 @@ async def public_imagine_ws(websocket: WebSocket):
                     token=token,
                     model_info=model_info,
                     prompt=prompt,
-                    n=6,
+                    n=request_n,
                     response_format="b64_json",
                     size="1024x1024",
                     aspect_ratio=aspect_ratio,
@@ -224,6 +299,11 @@ async def public_imagine_ws(websocket: WebSocket):
                         if isinstance(payload, dict):
                             payload.setdefault("run_id", run_id)
                         await _send(payload)
+                        if _is_final_image_payload(payload):
+                            final_count += 1
+                            if target_count > 0 and final_count >= target_count:
+                                stop_reason = "quantity_reached"
+                                break
                 else:
                     images = [img for img in result.data if img and img != "error"]
                     if images:
@@ -237,6 +317,10 @@ async def public_imagine_ws(websocket: WebSocket):
                                     "run_id": run_id,
                                 }
                             )
+                            final_count += 1
+                            if target_count > 0 and final_count >= target_count:
+                                stop_reason = "quantity_reached"
+                                break
                     else:
                         await _send(
                             {
@@ -245,6 +329,18 @@ async def public_imagine_ws(websocket: WebSocket):
                                 "code": "empty_image",
                             }
                         )
+
+                await _send(
+                    {
+                        "type": "status",
+                        "status": "round_done",
+                        "run_id": run_id,
+                        "round": round_index,
+                        "generated_count": final_count,
+                        "target_count": target_count,
+                        "request_n": request_n,
+                    }
+                )
 
             except asyncio.CancelledError:
                 break
@@ -259,7 +355,16 @@ async def public_imagine_ws(websocket: WebSocket):
                 )
                 await asyncio.sleep(1.5)
 
-        await _send({"type": "status", "status": "stopped", "run_id": run_id})
+        await _send(
+            {
+                "type": "status",
+                "status": "stopped",
+                "run_id": run_id,
+                "reason": stop_reason,
+                "generated_count": final_count,
+                "target_count": target_count,
+            }
+        )
 
     try:
         while True:
@@ -298,8 +403,40 @@ async def public_imagine_ws(websocket: WebSocket):
                 nsfw = payload.get("nsfw")
                 if nsfw is not None:
                     nsfw = bool(nsfw)
+                try:
+                    default_quantity = 0
+                    default_concurrent = 1
+                    if session_id:
+                        session_info = await _get_session(session_id)
+                        if session_info:
+                            default_quantity = _normalize_quantity(
+                                session_info.get("quantity"), default=0
+                            )
+                            default_concurrent = _normalize_concurrent(
+                                session_info.get("concurrent"), default=1
+                            )
+                    quantity = _normalize_quantity(
+                        payload.get("quantity"), default=default_quantity
+                    )
+                    concurrent = _normalize_concurrent(
+                        payload.get("concurrent"), default=default_concurrent
+                    )
+                except ValueError as e:
+                    code = "invalid_quantity"
+                    if "concurrent" in str(e):
+                        code = "invalid_concurrent"
+                    await _send(
+                        {
+                            "type": "error",
+                            "message": str(e),
+                            "code": code,
+                        }
+                    )
+                    continue
                 await _stop_run()
-                run_task = asyncio.create_task(_run(prompt, aspect_ratio, nsfw))
+                run_task = asyncio.create_task(
+                    _run(prompt, aspect_ratio, nsfw, quantity, concurrent)
+                )
             elif action == "stop":
                 await _stop_run()
             else:
@@ -334,6 +471,8 @@ async def public_imagine_sse(
     task_id: str = Query(""),
     prompt: str = Query(""),
     aspect_ratio: str = Query("2:3"),
+    quantity: int = Query(0),
+    concurrent: int = Query(1),
 ):
     """Imagine 图片瀑布流（SSE 兜底）"""
     session = None
@@ -356,12 +495,19 @@ async def public_imagine_sse(
         prompt = str(session.get("prompt") or "").strip()
         ratio = str(session.get("aspect_ratio") or "2:3").strip() or "2:3"
         nsfw = session.get("nsfw")
+        target_count = _normalize_quantity(session.get("quantity"), default=0)
+        batch_size = _normalize_concurrent(session.get("concurrent"), default=1)
     else:
         prompt = (prompt or "").strip()
         if not prompt:
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
         ratio = str(aspect_ratio or "2:3").strip() or "2:3"
         ratio = resolve_aspect_ratio(ratio)
+        try:
+            target_count = _normalize_quantity(quantity, default=0)
+            batch_size = _normalize_concurrent(concurrent, default=1)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         nsfw = request.query_params.get("nsfw")
         if nsfw is not None:
             nsfw = str(nsfw).lower() in ("1", "true", "yes", "on")
@@ -379,9 +525,12 @@ async def public_imagine_sse(
             token_mgr = await get_token_manager()
             sequence = 0
             run_id = uuid.uuid4().hex
+            final_count = 0
+            stop_reason = "stopped"
+            round_index = 0
 
             yield (
-                f"data: {orjson.dumps({'type': 'status', 'status': 'running', 'prompt': prompt, 'aspect_ratio': ratio, 'run_id': run_id}).decode()}\n\n"
+                f"data: {orjson.dumps({'type': 'status', 'status': 'running', 'prompt': prompt, 'aspect_ratio': ratio, 'run_id': run_id, 'target_count': target_count, 'batch_size': batch_size}).decode()}\n\n"
             )
 
             while True:
@@ -393,6 +542,18 @@ async def public_imagine_sse(
                         break
 
                 try:
+                    if target_count > 0 and final_count >= target_count:
+                        stop_reason = "quantity_reached"
+                        break
+
+                    round_index += 1
+                    remaining = (
+                        target_count - final_count if target_count > 0 else batch_size
+                    )
+                    request_n = (
+                        batch_size if target_count <= 0 else max(1, min(batch_size, remaining))
+                    )
+
                     await token_mgr.reload_if_stale()
                     token = None
                     for pool_name in ModelService.pool_candidates_for_model(
@@ -414,7 +575,7 @@ async def public_imagine_sse(
                         token=token,
                         model_info=model_info,
                         prompt=prompt,
-                        n=6,
+                        n=request_n,
                         response_format="b64_json",
                         size="1024x1024",
                         aspect_ratio=ratio,
@@ -429,6 +590,11 @@ async def public_imagine_sse(
                             if isinstance(payload, dict):
                                 payload.setdefault("run_id", run_id)
                             yield f"data: {orjson.dumps(payload).decode()}\n\n"
+                            if _is_final_image_payload(payload):
+                                final_count += 1
+                                if target_count > 0 and final_count >= target_count:
+                                    stop_reason = "quantity_reached"
+                                    break
                     else:
                         images = [img for img in result.data if img and img != "error"]
                         if images:
@@ -443,10 +609,18 @@ async def public_imagine_sse(
                                     "run_id": run_id,
                                 }
                                 yield f"data: {orjson.dumps(payload).decode()}\n\n"
+                                final_count += 1
+                                if target_count > 0 and final_count >= target_count:
+                                    stop_reason = "quantity_reached"
+                                    break
                         else:
                             yield (
                                 f"data: {orjson.dumps({'type': 'error', 'message': 'Image generation returned empty data.', 'code': 'empty_image'}).decode()}\n\n"
                             )
+
+                    yield (
+                        f"data: {orjson.dumps({'type': 'status', 'status': 'round_done', 'run_id': run_id, 'round': round_index, 'generated_count': final_count, 'target_count': target_count, 'request_n': request_n}).decode()}\n\n"
+                    )
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -456,8 +630,11 @@ async def public_imagine_sse(
                     )
                     await asyncio.sleep(1.5)
 
+                if stop_reason == "quantity_reached":
+                    break
+
             yield (
-                f"data: {orjson.dumps({'type': 'status', 'status': 'stopped', 'run_id': run_id}).decode()}\n\n"
+                f"data: {orjson.dumps({'type': 'status', 'status': 'stopped', 'run_id': run_id, 'reason': stop_reason, 'generated_count': final_count, 'target_count': target_count}).decode()}\n\n"
             )
         finally:
             if task_id:
@@ -483,6 +660,8 @@ class ImagineStartRequest(BaseModel):
     prompt: str
     aspect_ratio: Optional[str] = "2:3"
     nsfw: Optional[bool] = None
+    quantity: Optional[int] = 0
+    concurrent: Optional[int] = 1
 
 
 @router.post("/imagine/start", dependencies=[Depends(verify_public_key)])
@@ -491,8 +670,18 @@ async def public_imagine_start(data: ImagineStartRequest):
     if not prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
     ratio = resolve_aspect_ratio(str(data.aspect_ratio or "2:3").strip() or "2:3")
-    task_id = await _new_session(prompt, ratio, data.nsfw)
-    return {"task_id": task_id, "aspect_ratio": ratio}
+    try:
+        quantity = _normalize_quantity(data.quantity, default=0)
+        concurrent = _normalize_concurrent(data.concurrent, default=1)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    task_id = await _new_session(prompt, ratio, data.nsfw, quantity, concurrent)
+    return {
+        "task_id": task_id,
+        "aspect_ratio": ratio,
+        "quantity": quantity,
+        "concurrent": concurrent,
+    }
 
 
 class ImagineStopRequest(BaseModel):

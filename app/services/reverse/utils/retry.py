@@ -119,6 +119,14 @@ def extract_retry_after(error: Exception) -> Optional[float]:
     return None
 
 
+def is_non_retryable_upstream(error: Exception) -> bool:
+    """Return True for upstream errors that should fail fast."""
+    if not isinstance(error, UpstreamException):
+        return False
+    details = error.details or {}
+    return details.get("error_code") == "cloudflare_challenge"
+
+
 async def retry_on_status(
     func: Callable,
     *args,
@@ -170,6 +178,10 @@ async def retry_on_status(
             return result
 
         except Exception as e:
+            if is_non_retryable_upstream(e):
+                logger.error(f"Non-retryable upstream error: {e}")
+                raise
+
             # Extract status code
             status_code = extract_status(e)
 

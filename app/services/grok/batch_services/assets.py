@@ -21,11 +21,10 @@ class BaseAssetsService:
 
     async def _get_session(self) -> ResettableSession:
         if self._session is None:
-            browser = get_config("proxy.browser")
-            if browser:
-                self._session = ResettableSession(impersonate=browser)
-            else:
-                self._session = ResettableSession()
+            # Keep session-level transport neutral.
+            # Per-request impersonation is applied in reverse layer so we can
+            # fallback to non-impersonated requests on proxy TLS incompatibility.
+            self._session = ResettableSession(auto_impersonate=False)
         return self._session
 
     async def close(self):

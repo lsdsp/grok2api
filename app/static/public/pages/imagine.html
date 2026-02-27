@@ -10,7 +10,7 @@
   <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-mono/style.css" rel="stylesheet">
   <link href="/static/common/css/common.css?v=1.5.0" rel="stylesheet">
-  <link href="/static/public/css/imagine.css?v=1.5.0" rel="stylesheet">
+  <link href="/static/public/css/imagine.css?v=1.5.3" rel="stylesheet">
   <link href="/static/common/css/toast.css" rel="stylesheet">
 </head>
 
@@ -75,9 +75,9 @@
                   <div class="settings-field">
                     <label class="field-label" for="concurrentSelect">并发数量</label>
                     <select id="concurrentSelect" class="geist-input">
-                      <option value="1" selected>1 个任务</option>
-                      <option value="2">2 个任务</option>
-                      <option value="3">3 个任务</option>
+                      <option value="1" selected>1 张/轮</option>
+                      <option value="2">2 张/轮</option>
+                      <option value="3">3 张/轮</option>
                     </select>
                   </div>
                 </div>
@@ -97,10 +97,16 @@
               <div class="settings-block settings-block-row3">
                 <div class="settings-row">
                   <div class="settings-field">
-                    <label class="field-label" for="nsfwSelect">是否 NSFW</label>
-                    <select id="nsfwSelect" class="geist-input">
-                      <option value="true">开启</option>
-                      <option value="false">关闭</option>
+                    <label class="field-label" for="quantitySelect">生成数量</label>
+                    <select id="quantitySelect" class="geist-input">
+                      <option value="0" selected>无限</option>
+                      <option value="1">1 张</option>
+                      <option value="2">2 张</option>
+                      <option value="4">4 张</option>
+                      <option value="6">6 张</option>
+                      <option value="8">8 张</option>
+                      <option value="12">12 张</option>
+                      <option value="20">20 张</option>
                     </select>
                   </div>
                   <div class="settings-folder">
@@ -115,13 +121,13 @@
                 </div>
               </div>
               <div class="settings-block settings-block-row3b settings-block-single">
-                <div class="toggle-row toggle-row-fill">
+                <div class="toggle-row toggle-row-fill nsfw-row">
                   <div class="toggle-text">
-                    <div class="toggle-title">反向新增</div>
-                    <div class="toggle-desc">最新显示在上方</div>
+                    <div class="toggle-title">NSFW</div>
+                    <div class="toggle-desc">内容安全策略</div>
                   </div>
                   <label class="toggle">
-                    <input id="reverseInsertToggle" type="checkbox">
+                    <input id="nsfwToggle" type="checkbox" checked>
                     <span class="toggle-track"></span>
                   </label>
                 </div>
@@ -242,7 +248,7 @@
   <script src="/static/common/js/footer.js?v=1.5.0"></script>
   <script src="/static/common/js/toast.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-  <script src="/static/public/js/imagine.js?v=1.5.0"></script>
+  <script src="/static/public/js/imagine.js?v=1.5.3"></script>
 </body>
 
 </html>

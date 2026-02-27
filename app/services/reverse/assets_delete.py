@@ -11,6 +11,7 @@ from app.core.exceptions import UpstreamException
 from app.services.token.service import TokenService
 from app.services.reverse.utils.headers import build_headers
 from app.services.reverse.utils.retry import retry_on_status
+from app.services.reverse.utils.transport import request_with_impersonation_fallback
 
 DELETE_API = "https://grok.com/rest/assets-metadata"
 
@@ -52,12 +53,15 @@ class AssetsDeleteReverse:
             browser = get_config("proxy.browser")
 
             async def _do_request():
-                response = await session.delete(
+                response = await request_with_impersonation_fallback(
+                    session,
+                    "delete",
                     f"{DELETE_API}/{asset_id}",
-                    headers=headers,
+                    browser=browser,
                     proxies=proxies,
+                    log_prefix="AssetsDeleteReverse",
+                    headers=headers,
                     timeout=timeout,
-                    impersonate=browser,
                 )
 
                 if response.status_code != 200:

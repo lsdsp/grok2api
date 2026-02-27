@@ -13,6 +13,7 @@ from app.core.exceptions import UpstreamException
 from app.services.token.service import TokenService
 from app.services.reverse.utils.headers import build_headers
 from app.services.reverse.utils.retry import retry_on_status
+from app.services.reverse.utils.transport import request_with_impersonation_fallback
 
 DOWNLOAD_API = "https://assets.grok.com"
 
@@ -78,13 +79,16 @@ class AssetsDownloadReverse:
             browser = get_config("proxy.browser")
 
             async def _do_request():
-                response = await session.get(
+                response = await request_with_impersonation_fallback(
+                    session,
+                    "get",
                     url,
-                    headers=headers,
+                    browser=browser,
                     proxies=proxies,
+                    log_prefix="AssetsDownloadReverse",
+                    headers=headers,
                     timeout=timeout,
                     allow_redirects=True,
-                    impersonate=browser,
                     stream=True,
                 )
 
