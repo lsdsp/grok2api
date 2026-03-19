@@ -342,9 +342,11 @@ Config file: `data/config.toml`
 
 | Module | Field | Key | Description | Default |
 | :-- | :-- | :-- | :-- | :-- |
-| **app** | `app_url` | App URL | External base URL used for file links. | `http://127.0.0.1:8000` |
+| **app** | `app_url` | App URL | External base URL used for file links. | `""` |
 |  | `app_key` | Admin password | Login password for admin panel. | `grok2api` |
 |  | `api_key` | API key | Optional API key for access. | `""` |
+|  | `public_enabled` | Public playground | Enable public playground entry page. | `false` |
+|  | `public_key` | Public password | Optional password for public playground pages. | `""` |
 |  | `image_format` | Image format | `url` or `base64`. | `url` |
 |  | `video_format` | Video format | `html` or `url` (processed link). | `html` |
 |  | `temporary` | Temporary chat | Enable temporary chat mode. | `true` |
@@ -353,30 +355,44 @@ Config file: `data/config.toml`
 |  | `thinking` | Thinking | Enable reasoning output. | `true` |
 |  | `dynamic_statsig` | Dynamic statsig | Generate dynamic Statsig values. | `true` |
 |  | `filter_tags` | Filter tags | Filter special tags in responses. | `["xaiartifact", "xai:tool_usage_card", "grok:render"]` |
+|  | `tool_call_mode` | Tool call mode | `prompt` (default) or experimental `passthrough`. | `prompt` |
+| **security** | `auth_required` | API auth required | Require `app.api_key` auth for `/v1` API routes. | `false` |
+|  | `files_public` | Public files | Allow anonymous access to file endpoints. | `true` |
+| **config** | `auto_persist` | Auto persist | Persist merged/migrated config back to storage at startup. | `true` |
+|  | `schema_version` | Schema version | Config schema version for migrations. | `1` |
 | **proxy** | `base_proxy_url` | Base proxy URL | Proxy to Grok web. | `""` |
 |  | `asset_proxy_url` | Asset proxy URL | Proxy to Grok assets (img/video). | `""` |
 |  | `cf_clearance` | CF Clearance | Cloudflare clearance cookie. | `""` |
 |  | `browser` | Browser fingerprint | curl_cffi fingerprint (e.g. chrome136). | `chrome136` |
-|  | `user_agent` | User-Agent | HTTP User-Agent string. | `Mozilla/5.0 (Macintosh; ...)` |
-| **voice** | `timeout` | Timeout | Voice request timeout (seconds). | `120` |
-| **chat** | `concurrent` | Concurrency | Reverse interface concurrency limit. | `10` |
-|  | `timeout` | Timeout | Reverse request timeout (seconds). | `60` |
-|  | `stream_timeout` | Stream idle timeout | Stream idle timeout (seconds). | `60` |
-| **video** | `concurrent` | Concurrency | Reverse interface concurrency limit. | `10` |
-|  | `timeout` | Timeout | Reverse request timeout (seconds). | `60` |
-|  | `stream_timeout` | Stream idle timeout | Stream idle timeout (seconds). | `60` |
+|  | `user_agent` | User-Agent | HTTP User-Agent string. | `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ...` |
 | **retry** | `max_retry` | Max retry | Max retries for upstream failures. | `3` |
-|  | `retry_status_codes` | Retry codes | HTTP status codes that trigger retry. | `[401, 429, 403]` |
+|  | `retry_status_codes` | Retry codes | HTTP status codes that trigger retry. | `[401, 429]` |
+|  | `reset_session_status_codes` | Reset-session codes | Status codes that trigger session reset/proxy rotation. | `[403]` |
 |  | `retry_backoff_base` | Backoff base | Retry backoff base seconds. | `0.5` |
 |  | `retry_backoff_factor` | Backoff factor | Exponential backoff factor. | `2.0` |
-|  | `retry_backoff_max` | Backoff max | Max delay per retry (seconds). | `30.0` |
-|  | `retry_budget` | Retry budget | Max total retry time (seconds). | `90.0` |
-| **image** | `timeout` | Timeout | WebSocket timeout (seconds). | `120` |
-|  | `stream_timeout` | Stream idle timeout | WS stream idle timeout (seconds). | `120` |
+|  | `retry_backoff_max` | Backoff max | Max delay per retry (seconds). | `20.0` |
+|  | `retry_budget` | Retry budget | Max total retry time (seconds). | `60.0` |
+| **rate_limit** | `enabled` | Enabled | Enable global request rate limiting. | `false` |
+|  | `enabled_in_production` | Enable in production | If `enabled=false`, still enable in production mode. | `true` |
+|  | `window_seconds` | Window seconds | Rate-limit window in seconds. | `60` |
+|  | `default_limit_per_window` | Default limit | Default requests per window for one `(method + path + api_key/ip)` key. | `120` |
+|  | `trust_x_forwarded_for` | Trust X-Forwarded-For | Use XFF as client IP (only behind trusted proxy). | `false` |
+|  | `include_prefixes` | Include prefixes | Path prefixes included in limiting. | `["/v1/"]` |
+|  | `exclude_prefixes` | Exclude prefixes | Path prefixes excluded from limiting. | `["/v1/admin", "/v1/files", "/static/"]` |
+|  | `route_limits` | Route overrides | Per-route overrides (exact or prefix `*`). | `{"/v1/chat/completions":80,"/v1/images/generations":40,"/v1/public/imagine*":40}` |
+| **chat** | `concurrent` | Concurrency | Reverse interface concurrency limit. | `50` |
+|  | `timeout` | Timeout | Reverse request timeout (seconds). | `60` |
+|  | `stream_timeout` | Stream idle timeout | Stream idle timeout (seconds). | `60` |
+| **image** | `timeout` | Timeout | WebSocket timeout (seconds). | `60` |
+|  | `stream_timeout` | Stream idle timeout | WS stream idle timeout (seconds). | `60` |
 |  | `final_timeout` | Final timeout | Wait time after medium image (seconds). | `15` |
 |  | `nsfw` | NSFW | Enable NSFW. | `true` |
 |  | `medium_min_bytes` | Medium min bytes | Minimum size for medium image. | `30000` |
 |  | `final_min_bytes` | Final min bytes | Minimum size for final image (JPG > 100KB typical). | `100000` |
+| **video** | `concurrent` | Concurrency | Reverse interface concurrency limit. | `100` |
+|  | `timeout` | Timeout | Reverse request timeout (seconds). | `60` |
+|  | `stream_timeout` | Stream idle timeout | Stream idle timeout (seconds). | `60` |
+| **voice** | `timeout` | Timeout | Voice request timeout (seconds). | `60` |
 | **token** | `auto_refresh` | Auto refresh | Enable token auto refresh. | `true` |
 |  | `refresh_interval_hours` | Refresh interval | Basic token refresh interval (hours). | `8` |
 |  | `super_refresh_interval_hours` | Super refresh interval | Super token refresh interval (hours). | `2` |
@@ -384,22 +400,25 @@ Config file: `data/config.toml`
 |  | `save_delay_ms` | Save delay | Merge write delay (ms). | `500` |
 |  | `usage_flush_interval_sec` | Usage flush interval | Minimum interval to flush usage fields to DB (seconds). | `5` |
 |  | `reload_interval_sec` | Reload interval | Multi-worker token reload interval (seconds). | `30` |
+|  | `cf_challenge_pause_sec` | CF challenge pause | Pause auto-refresh after Cloudflare challenge (seconds). | `900` |
+| **logging** | `ignore_paths` | Ignore paths | Exact request paths skipped in request logging. | `["/", "/login", "/imagine", "/voice", "/admin", "/admin/login", "/admin/config", "/admin/cache", "/admin/token"]` |
+|  | `ignore_prefixes` | Ignore prefixes | Path prefixes skipped in request logging. | `["/static/"]` |
 | **cache** | `enable_auto_clean` | Auto clean | Enable cache auto cleanup. | `true` |
-|  | `limit_mb` | Size limit | Cleanup threshold (MB). | `1024` |
-| **asset** | `upload_concurrent` | Upload concurrency | Max upload concurrency (recommended 30). | `30` |
+|  | `limit_mb` | Size limit | Cleanup threshold (MB). | `512` |
+| **asset** | `upload_concurrent` | Upload concurrency | Max upload concurrency. | `100` |
 |  | `upload_timeout` | Upload timeout | Upload timeout (seconds). | `60` |
-|  | `download_concurrent` | Download concurrency | Max download concurrency (recommended 30). | `30` |
+|  | `download_concurrent` | Download concurrency | Max download concurrency. | `100` |
 |  | `download_timeout` | Download timeout | Download timeout (seconds). | `60` |
-|  | `list_concurrent` | List concurrency | Max list concurrency (recommended 10). | `10` |
+|  | `list_concurrent` | List concurrency | Max list concurrency. | `100` |
 |  | `list_timeout` | List timeout | List timeout (seconds). | `60` |
-|  | `list_batch_size` | List batch size | Tokens per list batch (recommended 10). | `10` |
-|  | `delete_concurrent` | Delete concurrency | Max delete concurrency (recommended 10). | `10` |
+|  | `list_batch_size` | List batch size | Tokens per list batch. | `50` |
+|  | `delete_concurrent` | Delete concurrency | Max delete concurrency. | `100` |
 |  | `delete_timeout` | Delete timeout | Delete timeout (seconds). | `60` |
-|  | `delete_batch_size` | Delete batch size | Tokens per delete batch (recommended 10). | `10` |
-| **nsfw** | `concurrent` | Concurrency | NSFW batch enable concurrency (recommended 10). | `10` |
-|  | `batch_size` | Batch size | NSFW batch size (recommended 50). | `50` |
+|  | `delete_batch_size` | Delete batch size | Tokens per delete batch. | `50` |
+| **nsfw** | `concurrent` | Concurrency | NSFW batch enable concurrency. | `60` |
+|  | `batch_size` | Batch size | NSFW batch size. | `30` |
 |  | `timeout` | Timeout | NSFW request timeout (seconds). | `60` |
-| **usage** | `concurrent` | Concurrency | Usage refresh concurrency (recommended 10). | `10` |
+| **usage** | `concurrent` | Concurrency | Usage refresh concurrency. | `100` |
 |  | `batch_size` | Batch size | Usage batch size (recommended 50). | `50` |
 |  | `timeout` | Timeout | Usage request timeout (seconds). | `60` |
 

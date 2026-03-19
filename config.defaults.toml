@@ -116,6 +116,8 @@ save_delay_ms = 500
 usage_flush_interval_sec = 5
 # 多 worker 状态同步间隔（秒）
 reload_interval_sec = 30
+# 遇到 Cloudflare challenge 后暂停自动刷新的时间（秒）
+cf_challenge_pause_sec = 900
 
 # ==================== 日志配置 ====================
 [logging]

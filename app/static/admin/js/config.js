@@ -2,15 +2,19 @@ let apiKey = '';
 let currentConfig = {};
 const byId = (id) => document.getElementById(id);
 const NUMERIC_FIELDS = new Set([
+  'schema_version',
   'timeout',
   'max_retry',
   'retry_backoff_base',
   'retry_backoff_factor',
   'retry_backoff_max',
   'retry_budget',
+  'window_seconds',
+  'default_limit_per_window',
   'refresh_interval_hours',
   'super_refresh_interval_hours',
   'fail_threshold',
+  'cf_challenge_pause_sec',
   'limit_mb',
   'save_delay_ms',
   'usage_flush_interval_sec',
@@ -48,7 +52,22 @@ const LOCALE_MAP = {
     "stream": { title: "流式响应", desc: "是否默认启用流式输出。" },
     "thinking": { title: "思维链", desc: "是否默认启用思维链输出。" },
     "dynamic_statsig": { title: "动态指纹", desc: "是否默认启用动态生成 Statsig 指纹。" },
-    "filter_tags": { title: "过滤标签", desc: "设置自动过滤 Grok 响应中的特殊标签。" }
+    "filter_tags": { title: "过滤标签", desc: "设置自动过滤 Grok 响应中的特殊标签。" },
+    "tool_call_mode": { title: "Tool Call 模式", desc: "Tool call 处理模式：prompt 为提示词模拟，passthrough 为实验性透传。" }
+  },
+
+
+  "security": {
+    "label": "安全配置",
+    "auth_required": { title: "启用 API 鉴权", desc: "是否要求 /v1 接口必须携带 app.api_key 才可访问。" },
+    "files_public": { title: "文件匿名访问", desc: "文件下载接口是否允许匿名访问（关闭后复用 app.api_key 鉴权）。" }
+  },
+
+
+  "config": {
+    "label": "配置系统",
+    "auto_persist": { title: "自动落盘", desc: "启动时是否把合并/迁移后的配置自动写回存储。" },
+    "schema_version": { title: "配置版本", desc: "配置结构版本号，用于后续配置迁移。" }
   },
 
 
@@ -66,10 +85,24 @@ const LOCALE_MAP = {
     "label": "重试策略",
     "max_retry": { title: "最大重试次数", desc: "请求 Grok 服务失败时的最大重试次数。" },
     "retry_status_codes": { title: "重试状态码", desc: "触发重试的 HTTP 状态码列表。" },
+    "reset_session_status_codes": { title: "重建会话状态码", desc: "命中这些状态码时触发重建 session（常用于轮换代理）。" },
     "retry_backoff_base": { title: "退避基数", desc: "重试退避的基础延迟（秒）。" },
     "retry_backoff_factor": { title: "退避倍率", desc: "重试退避的指数放大系数。" },
     "retry_backoff_max": { title: "退避上限", desc: "单次重试等待的最大延迟（秒）。" },
     "retry_budget": { title: "退避预算", desc: "单次请求的最大重试总耗时（秒）。" }
+  },
+
+
+  "rate_limit": {
+    "label": "入口限流",
+    "enabled": { title: "启用限流", desc: "是否启用入口请求限流。" },
+    "enabled_in_production": { title: "生产默认启用", desc: "当 enabled=false 时，生产环境是否默认开启限流。" },
+    "window_seconds": { title: "限流窗口", desc: "限流统计窗口时长（秒）。" },
+    "default_limit_per_window": { title: "默认窗口上限", desc: "单个 (method + path + api_key/ip) 在窗口内的默认请求上限。" },
+    "trust_x_forwarded_for": { title: "信任 X-Forwarded-For", desc: "是否使用 X-Forwarded-For 作为客户端真实 IP（仅可信反代场景开启）。" },
+    "include_prefixes": { title: "纳入前缀", desc: "参与限流的路径前缀列表。" },
+    "exclude_prefixes": { title: "排除前缀", desc: "不参与限流的路径前缀列表。" },
+    "route_limits": { title: "路由限流覆盖", desc: "路由级限流覆盖映射，支持精确路径和前缀* 规则。" }
   },
 
 
@@ -129,7 +162,15 @@ const LOCALE_MAP = {
     "fail_threshold": { title: "失败阈值", desc: "单个 Token 连续失败多少次后被标记为不可用。" },
     "save_delay_ms": { title: "保存延迟", desc: "Token 变更合并写入的延迟（毫秒）。" },
     "usage_flush_interval_sec": { title: "用量落库间隔", desc: "用量类字段写入数据库的最小间隔（秒）。" },
-    "reload_interval_sec": { title: "同步间隔", desc: "多 worker 场景下 Token 状态刷新间隔（秒）。" }
+    "reload_interval_sec": { title: "同步间隔", desc: "多 worker 场景下 Token 状态刷新间隔（秒）。" },
+    "cf_challenge_pause_sec": { title: "CF 挑战暂停", desc: "遇到 Cloudflare challenge 后暂停自动刷新任务的时长（秒）。" }
+  },
+
+
+  "logging": {
+    "label": "日志配置",
+    "ignore_paths": { title: "忽略精确路径", desc: "这些精确路径不会记录请求日志。" },
+    "ignore_prefixes": { title: "忽略路径前缀", desc: "这些路径前缀下的请求不会记录请求日志。" }
   },
 
 
@@ -158,7 +199,8 @@ const LOCALE_MAP = {
 
 // 配置部分说明（可选）
 const SECTION_DESCRIPTIONS = {
-  "proxy": "配置不正确将导致 403 错误。服务首次请求 Grok 时的 IP 必须与获取 CF Clearance 时的 IP 一致，后续服务器请求 IP 变化不会导致 403。"
+  "proxy": "配置不正确将导致 403 错误。服务首次请求 Grok 时的 IP 必须与获取 CF Clearance 时的 IP 一致，后续服务器请求 IP 变化不会导致 403。",
+  "rate_limit": "建议生产环境启用限流，避免单 API Key 或单 IP 在短时间内触发上游风控。"
 };
 
 const SECTION_ORDER = new Map(Object.keys(LOCALE_MAP).map((key, index) => [key, index]));
@@ -410,6 +452,12 @@ function buildFieldCard(section, key, val) {
     built = buildSelectInput(section, key, val, [
       { val: 'html', text: 'HTML' },
       { val: 'url', text: 'URL' }
+    ]);
+  }
+  else if (key === 'tool_call_mode') {
+    built = buildSelectInput(section, key, val, [
+      { val: 'prompt', text: 'Prompt' },
+      { val: 'passthrough', text: 'Passthrough' }
     ]);
   }
   else if (Array.isArray(val) || typeof val === 'object') {
