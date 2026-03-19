@@ -2,8 +2,13 @@
 API 认证模块
 """
 
+<<<<<<< HEAD
 import os
 from typing import Optional
+=======
+import hmac
+from typing import Optional, Iterable
+>>>>>>> 635e6e3524c5f54f26cd693b8bf42d64f031503b
 from fastapi import HTTPException, status, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -11,10 +16,15 @@ from app.core.config import get_config
 
 DEFAULT_API_KEY = ""
 DEFAULT_APP_KEY = "grok2api"
+<<<<<<< HEAD
 DEFAULT_PUBLIC_KEY = ""
 DEFAULT_PUBLIC_ENABLED = False
 DEFAULT_AUTH_REQUIRED = False
 DEFAULT_FILES_PUBLIC = True
+=======
+DEFAULT_FUNCTION_KEY = ""
+DEFAULT_FUNCTION_ENABLED = False
+>>>>>>> 635e6e3524c5f54f26cd693b8bf42d64f031503b
 
 # 定义 Bearer Scheme
 security = HTTPBearer(
@@ -34,6 +44,29 @@ def get_admin_api_key() -> str:
     return api_key or ""
 
 
+<<<<<<< HEAD
+=======
+def _normalize_api_keys(value: Optional[object]) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        return [part.strip() for part in raw.split(",") if part.strip()]
+    if isinstance(value, Iterable):
+        keys: list[str] = []
+        for item in value:
+            if not item:
+                continue
+            if isinstance(item, str):
+                stripped = item.strip()
+                if stripped:
+                    keys.append(stripped)
+        return keys
+    return []
+
+>>>>>>> 635e6e3524c5f54f26cd693b8bf42d64f031503b
 def get_app_key() -> str:
     """
     获取 App Key（后台管理密码）。
@@ -41,22 +74,41 @@ def get_app_key() -> str:
     app_key = get_config("app.app_key", DEFAULT_APP_KEY)
     return app_key or ""
 
+<<<<<<< HEAD
 
 def get_public_api_key() -> str:
+=======
+def get_function_api_key() -> str:
+>>>>>>> 635e6e3524c5f54f26cd693b8bf42d64f031503b
     """
-    获取 Public API Key。
+    获取功能玩法 API Key。
 
-    为空时表示不启用 public 接口认证。
+    为空时表示不启用功能玩法接口认证。
     """
-    public_key = get_config("app.public_key", DEFAULT_PUBLIC_KEY)
-    return public_key or ""
+    function_key = get_config("app.function_key", DEFAULT_FUNCTION_KEY)
+    return function_key or ""
 
 
+<<<<<<< HEAD
 def is_public_enabled() -> bool:
+=======
+def is_function_enabled() -> bool:
+>>>>>>> 635e6e3524c5f54f26cd693b8bf42d64f031503b
     """
-    是否开启 public 功能入口。
+    是否开启功能玩法入口。
     """
-    return bool(get_config("app.public_enabled", DEFAULT_PUBLIC_ENABLED))
+    return bool(get_config("app.function_enabled", DEFAULT_FUNCTION_ENABLED))
+
+
+def _match_function_key(credentials: str, function_key: str) -> bool:
+    """检查凭证是否匹配 function_key。"""
+    if not function_key:
+        return False
+    normalized = function_key.strip()
+    if not normalized:
+        return False
+    # 常量时间比较，避免基于时序的探测
+    return hmac.compare_digest(credentials, normalized)
 
 
 def is_api_auth_required() -> bool:
@@ -68,6 +120,7 @@ def is_api_auth_required() -> bool:
 
 def is_files_public() -> bool:
     """
+<<<<<<< HEAD
     文件服务是否允许匿名访问。
     """
     return bool(get_config("security.files_public", DEFAULT_FILES_PUBLIC))
@@ -92,6 +145,12 @@ def _validate_bearer(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=misconfigured_detail,
         )
+=======
+    api_key = get_admin_api_key()
+    api_keys = _normalize_api_keys(api_key)
+    if not api_keys:
+        return None
+>>>>>>> 635e6e3524c5f54f26cd693b8bf42d64f031503b
 
     if not auth:
         raise HTTPException(
@@ -100,14 +159,25 @@ def _validate_bearer(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+<<<<<<< HEAD
     if auth.credentials != expected:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+=======
+    # 标准 api_key 验证
+    for key in api_keys:
+        if hmac.compare_digest(auth.credentials, key):
+            return auth.credentials
+>>>>>>> 635e6e3524c5f54f26cd693b8bf42d64f031503b
 
-    return auth.credentials
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid authentication token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 async def verify_api_key(
@@ -168,7 +238,7 @@ async def verify_app_key(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if auth.credentials != app_key:
+    if not hmac.compare_digest(auth.credentials, app_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token",
@@ -178,23 +248,24 @@ async def verify_app_key(
     return auth.credentials
 
 
-async def verify_public_key(
+async def verify_function_key(
     auth: Optional[HTTPAuthorizationCredentials] = Security(security),
 ) -> Optional[str]:
     """
-    验证 Public Key（public 接口使用）。
+    验证功能玩法 Key（function 接口使用）。
 
-    默认不公开，需配置 public_key 才能访问；若开启 public_enabled 且未配置 public_key，则放开访问。
+    默认不公开，需配置 function_key 才能访问；
+    若开启 function_enabled 且未配置 function_key，则放开访问。
     """
-    public_key = get_public_api_key()
-    public_enabled = is_public_enabled()
+    function_key = get_function_api_key()
+    function_enabled = is_function_enabled()
 
-    if not public_key:
-        if public_enabled:
+    if not function_key:
+        if function_enabled:
             return None
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Public access is disabled",
+            detail="Function access is disabled",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -205,11 +276,11 @@ async def verify_public_key(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if auth.credentials != public_key:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    if _match_function_key(auth.credentials, function_key):
+        return auth.credentials
 
-    return auth.credentials
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid authentication token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )

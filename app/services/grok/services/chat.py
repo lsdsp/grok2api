@@ -22,7 +22,7 @@ from app.core.exceptions import (
 from app.services.grok.services.model import ModelService
 from app.services.grok.utils.upload import UploadService
 from app.services.grok.utils import process as proc_base
-from app.services.grok.utils.retry import pick_token, rate_limited
+from app.services.grok.utils.retry import pick_token, rate_limited, transient_upstream
 from app.services.reverse.app_chat import AppChatReverse
 from app.services.reverse.utils.session import ResettableSession
 from app.services.grok.utils.stream import wrap_stream_with_usage
@@ -30,7 +30,6 @@ from app.services.grok.utils.tool_call import (
     build_tool_prompt,
     parse_tool_calls,
     parse_tool_call_block,
-    build_tool_overrides,
     format_tool_history,
 )
 from app.services.token import get_token_manager, EffortType
@@ -363,11 +362,6 @@ class GrokChatService:
         if reasoning_effort is not None:
             model_config_override["reasoningEffort"] = reasoning_effort
 
-        # Passthrough mode: build tool_overrides for Grok API
-        tool_overrides_payload = None
-        if tools and get_config("app.tool_call_mode") == "passthrough":
-            tool_overrides_payload = build_tool_overrides(tools)
-
         response = await self.chat(
             token,
             message,
@@ -375,7 +369,7 @@ class GrokChatService:
             mode,
             stream,
             file_attachments=all_attachments,
-            tool_overrides=tool_overrides_payload,
+            tool_overrides=None,
             model_config_override=model_config_override,
         )
 
@@ -411,7 +405,7 @@ class ChatService:
 
         # 跨 Token 重试循环
         tried_tokens = set()
-        max_token_retries = int(get_config("retry.max_retry"))
+        max_token_retries = int(get_config("retry.max_retry") or 3)
         last_error = None
 
         for attempt in range(max_token_retries):
@@ -481,6 +475,20 @@ class ChatService:
                     )
                     continue
 
+                if transient_upstream(e):
+                    has_alternative_token = False
+                    for pool_name in ModelService.pool_candidates_for_model(model):
+                        if token_mgr.get_token(pool_name, exclude=tried_tokens):
+                            has_alternative_token = True
+                            break
+                    if not has_alternative_token:
+                        raise
+                    logger.warning(
+                        f"Transient upstream error for token {token[:10]}..., "
+                        f"trying next token (attempt {attempt + 1}/{max_token_retries}): {e}"
+                    )
+                    continue
+
                 # 非 429 错误，不换 token，直接抛出
                 raise
 
@@ -504,6 +512,7 @@ class StreamProcessor(proc_base.BaseProcessor):
         self.fingerprint: str = ""
         self.rollout_id: str = ""
         self.think_opened: bool = False
+        self.think_closed_once: bool = False
         self.image_think_active: bool = False
         self.role_sent: bool = False
         self.filter_tags = get_config("app.filter_tags")
@@ -521,6 +530,16 @@ class StreamProcessor(proc_base.BaseProcessor):
         self._tool_buffer = ""
         self._tool_partial = ""
         self._tool_calls_seen = False
+        self._tool_call_index = 0
+
+    def _with_tool_index(self, tool_call: Any) -> Any:
+        if not isinstance(tool_call, dict):
+            return tool_call
+        if tool_call.get("index") is None:
+            tool_call = dict(tool_call)
+            tool_call["index"] = self._tool_call_index
+            self._tool_call_index += 1
+        return tool_call
 
     def _filter_tool_card(self, token: str) -> str:
         if not token or not self.tool_usage_enabled:
@@ -645,7 +664,7 @@ class StreamProcessor(proc_base.BaseProcessor):
             data = data[end_idx + len(end_tag) :]
             tool_call = parse_tool_call_block(self._tool_buffer, self.tools)
             if tool_call:
-                events.append(("tool", tool_call))
+                events.append(("tool", self._with_tool_index(tool_call)))
                 self._tool_calls_seen = True
             self._tool_buffer = ""
             self._tool_state = "text"
@@ -663,7 +682,7 @@ class StreamProcessor(proc_base.BaseProcessor):
         raw = f"{self._tool_buffer}{self._tool_partial}"
         tool_call = parse_tool_call_block(raw, self.tools)
         if tool_call:
-            events.append(("tool", tool_call))
+            events.append(("tool", self._with_tool_index(tool_call)))
             self._tool_calls_seen = True
         elif raw:
             events.append(("text", f"<tool_call>{raw}"))
@@ -752,6 +771,7 @@ class StreamProcessor(proc_base.BaseProcessor):
                     if self.image_think_active and self.think_opened:
                         yield self._sse("\n</think>\n")
                         self.think_opened = False
+                        self.think_closed_once = True
                     self.image_think_active = False
                     for url in proc_base._collect_images(mr):
                         parts = url.split("/")
@@ -792,10 +812,15 @@ class StreamProcessor(proc_base.BaseProcessor):
                 if (token := resp.get("token")) is not None:
                     if not token:
                         continue
+                    if is_thinking and self.think_closed_once and not self.image_think_active:
+                        continue
                     filtered = self._filter_token(token)
                     if not filtered:
                         continue
-                    in_think = is_thinking or self.image_think_active
+                    in_think = (
+                        (is_thinking and not self.think_closed_once)
+                        or self.image_think_active
+                    )
                     if in_think:
                         if not self.show_think:
                             continue
@@ -806,6 +831,7 @@ class StreamProcessor(proc_base.BaseProcessor):
                         if self.think_opened:
                             yield self._sse("\n</think>\n")
                             self.think_opened = False
+                            self.think_closed_once = True
 
                     if in_think:
                         yield self._sse(filtered)
@@ -823,6 +849,7 @@ class StreamProcessor(proc_base.BaseProcessor):
 
             if self.think_opened:
                 yield self._sse("</think>\n")
+                self.think_closed_once = True
 
             if self._tool_stream_enabled:
                 for kind, payload in self._flush_tool_stream():

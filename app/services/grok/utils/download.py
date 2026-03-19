@@ -65,6 +65,7 @@ class DownloadService:
             path = path_or_url
             asset_url = f"https://assets.grok.com{path_or_url}"
 
+<<<<<<< HEAD
         app_url = str(get_config("app.app_url") or "").strip()
         host = (parsed.netloc or "").lower() if parsed else ""
         is_assets_host = host.endswith("assets.grok.com") or not path_or_url.startswith(
@@ -85,6 +86,14 @@ class DownloadService:
                 return f"{app_url.rstrip('/')}{proxy_path}"
             return proxy_path
 
+=======
+        app_url = get_config("app.app_url")
+        if app_url:
+            if parsed and parsed.netloc and parsed.netloc != "assets.grok.com":
+                return asset_url
+            await self.download_file(asset_url, token, media_type)
+            return f"{app_url.rstrip('/')}/v1/files/{media_type}{path}"
+>>>>>>> 635e6e3524c5f54f26cd693b8bf42d64f031503b
         return asset_url
 
     async def render_image(
@@ -207,7 +216,8 @@ class DownloadService:
         async with _get_download_semaphore():
             file_path = self._normalize_path(file_path)
             cache_dir = self.image_dir if media_type == "image" else self.video_dir
-            filename = file_path.lstrip("/").replace("/", "-")
+            cache_key = urlparse(file_path).path or file_path
+            filename = cache_key.lstrip("/").replace("/", "-")
             cache_path = cache_dir / filename
 
             lock_name = (
